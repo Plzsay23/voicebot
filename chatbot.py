@@ -8,9 +8,15 @@ import subprocess
 from pathlib import Path
 
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
 from llama_cpp import Llama
+from funasr_onnx import SenseVoiceSmall
+
+try:
+    from funasr_onnx.utils.postprocess_utils import (
+        rich_transcription_postprocess as sv_postprocess,
+    )
+except Exception:  # pragma: no cover - postprocess 위치가 버전마다 다를 수 있음
+    sv_postprocess = None
 
 
 try:
@@ -24,8 +30,18 @@ BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(dotenv_path=BASE_DIR / ".env")
 
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_STT_MODEL = os.getenv("GEMINI_STT_MODEL", "gemini-2.5-flash")
+# 로컬 STT: SenseVoiceSmall (ONNX). 폴더에 model.onnx / am.mvn /
+# config.yaml / chn_jpn_yue_eng_ko_spectok.bpe.model 이 있어야 한다.
+SENSEVOICE_DIR = Path(
+    os.getenv("SENSEVOICE_DIR", str(BASE_DIR / "models" / "sensevoice_ko"))
+)
+STT_LANGUAGE = os.getenv("STT_LANGUAGE", "ko")
+SENSEVOICE_QUANTIZE = os.getenv("SENSEVOICE_QUANTIZE", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+    "y",
+)
 
 LOCAL_LLM_MODEL_PATH = Path(
     os.getenv(
@@ -44,8 +60,9 @@ REQUIRE_WAKE_NAME = os.getenv("REQUIRE_WAKE_NAME", "true").lower() in (
     "y",
 )
 
-INPUT_DEVICE = os.getenv("INPUT_DEVICE", "DeepFilterMic")
-SAMPLE_RATE = int(os.getenv("SAMPLE_RATE", "48000"))
+# 비어 있으면 시스템 기본 입력 장치(ReSpeaker)를 사용한다.
+INPUT_DEVICE = os.getenv("INPUT_DEVICE", "").strip()
+SAMPLE_RATE = int(os.getenv("SAMPLE_RATE", "16000"))
 CHANNELS = int(os.getenv("CHANNELS", "1"))
 RECORD_SECONDS = float(os.getenv("RECORD_SECONDS", "5"))
 
@@ -64,18 +81,6 @@ MAX_TOKENS = int(os.getenv("MAX_TOKENS", "60"))
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.4"))
 TOP_P = float(os.getenv("TOP_P", "0.9"))
 REPEAT_PENALTY = float(os.getenv("REPEAT_PENALTY", "1.08"))
-
-
-STT_PROMPT = """
-이 오디오 파일의 한국어 음성을 정확히 전사해라.
-
-규칙:
-- 사용자가 말한 내용만 출력한다.
-- 설명하지 않는다.
-- 따옴표를 붙이지 않는다.
-- 한국어로 들리면 한국어로 쓴다.
-- 아무 말도 들리지 않으면 빈 문자열만 출력한다.
-"""
 
 
 SYSTEM_PROMPT = (
@@ -105,11 +110,14 @@ def check_binary(name: str):
 
 
 def check_env():
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY가 없습니다. .env에 넣으십시오.")
+    if not SENSEVOICE_DIR.exists():
+        raise FileNotFoundError(f"SenseVoice 모델 폴더가 없습니다: {SENSEVOICE_DIR}")
 
-    if any(ord(c) > 127 for c in GEMINI_API_KEY):
-        raise RuntimeError("GEMINI_API_KEY에 한글 같은 비ASCII 문자가 들어 있습니다.")
+    model_file = "model_quant.onnx" if SENSEVOICE_QUANTIZE else "model.onnx"
+    if not (SENSEVOICE_DIR / model_file).exists():
+        raise FileNotFoundError(
+            f"SenseVoice ONNX 파일이 없습니다: {SENSEVOICE_DIR / model_file}"
+        )
 
     if not LOCAL_LLM_MODEL_PATH.exists():
         raise FileNotFoundError(f"로컬 LLM 모델 파일이 없습니다: {LOCAL_LLM_MODEL_PATH}")
@@ -159,13 +167,17 @@ def record_audio(seconds: float):
         "--signal=INT",
         f"{seconds}s",
         "parecord",
-        f"--device={INPUT_DEVICE}",
         f"--rate={SAMPLE_RATE}",
         f"--channels={CHANNELS}",
         "--format=s16le",
         "--file-format=wav",
         str(RECORD_PATH),
     ]
+
+    # INPUT_DEVICE가 지정된 경우에만 장치를 강제하고,
+    # 비어 있으면 시스템 기본 입력 장치를 사용한다.
+    if INPUT_DEVICE:
+        cmd.insert(4, f"--device={INPUT_DEVICE}")
 
     safe_print(f"\n[REC] {seconds:g}초 녹음합니다. 말씀하십시오.")
     run_command(cmd, allow_timeout_124=True)
@@ -176,38 +188,83 @@ def record_audio(seconds: float):
     safe_print(f"[REC] 저장 완료: {RECORD_PATH.name} ({RECORD_PATH.stat().st_size} bytes)")
 
 
-def transcribe_audio(client: genai.Client) -> str:
-    safe_print("[STT] Gemini STT 중...")
+def load_stt():
+    safe_print("[STT] 로컬 SenseVoice 모델 로딩 중...")
+    safe_print(f"[STT] dir={SENSEVOICE_DIR}")
 
-    uploaded_file = client.files.upload(file=str(RECORD_PATH))
+    t0 = time.time()
 
+    model = SenseVoiceSmall(
+        str(SENSEVOICE_DIR),
+        batch_size=1,
+        quantize=SENSEVOICE_QUANTIZE,
+        intra_op_num_threads=N_THREADS,
+    )
+
+    safe_print(f"[STT] 로딩 완료: {time.time() - t0:.2f}s")
+
+    # 첫 추론은 onnxruntime 그래프 최적화 때문에 매우 느리다(~1분).
+    # 무음 버퍼로 미리 워밍업해서 실제 대화 첫 턴이 느려지지 않게 한다.
     try:
-        response = client.models.generate_content(
-            model=GEMINI_STT_MODEL,
-            contents=[
-                STT_PROMPT,
-                uploaded_file,
-            ],
-            config=types.GenerateContentConfig(
-                temperature=0.0,
-                max_output_tokens=256,
-            ),
-        )
+        safe_print("[STT] 워밍업 중... (최초 1회, 시간이 걸릴 수 있음)")
+        warmup_wav = BASE_DIR / "_stt_warmup.wav"
+        import wave
 
-        text = (response.text or "").strip()
-        text = text.replace("```", "").strip()
+        with wave.open(str(warmup_wav), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(SAMPLE_RATE)
+            w.writeframes(b"\x00\x00" * SAMPLE_RATE)  # 1초 무음
 
-        if text.startswith('"') and text.endswith('"'):
-            text = text[1:-1].strip()
+        t0 = time.time()
+        model([str(warmup_wav)], language=STT_LANGUAGE, use_itn=True)
+        safe_print(f"[STT] 워밍업 완료: {time.time() - t0:.2f}s")
 
-        safe_print(f"[USER] {text}")
-        return text
-
-    finally:
         try:
-            client.files.delete(name=uploaded_file.name)
+            warmup_wav.unlink()
         except Exception:
             pass
+    except Exception as e:
+        safe_print(f"[STT] 워밍업 건너뜀: {e}")
+
+    return model
+
+
+def _clean_stt_text(text: str) -> str:
+    if not text:
+        return ""
+
+    if sv_postprocess is not None:
+        try:
+            text = sv_postprocess(text)
+        except Exception:
+            pass
+
+    # 혹시 남아 있는 <|...|> 특수 토큰 제거
+    while "<|" in text and "|>" in text:
+        start = text.index("<|")
+        end = text.index("|>", start) + 2
+        text = text[:start] + text[end:]
+
+    return text.strip()
+
+
+def transcribe_audio(stt_model) -> str:
+    safe_print("[STT] SenseVoice 전사 중...")
+
+    t0 = time.time()
+    result = stt_model([str(RECORD_PATH)], language=STT_LANGUAGE, use_itn=True)
+    elapsed = time.time() - t0
+
+    raw = result[0] if result else ""
+    if isinstance(raw, dict):
+        raw = raw.get("text", "")
+
+    text = _clean_stt_text(raw)
+
+    safe_print(f"[USER] {text}")
+    safe_print(f"[STT_TIME] {elapsed:.2f}s")
+    return text
 
 
 def normalize_text(text: str) -> str:
@@ -395,18 +452,20 @@ def print_audio_status():
 def main():
     check_env()
 
-    stt_client = genai.Client(api_key=GEMINI_API_KEY)
+    stt_model = load_stt()
     llm = load_local_llm()
     history = []
 
+    input_label = INPUT_DEVICE if INPUT_DEVICE else "시스템 기본 마이크 (ReSpeaker)"
+
     safe_print("======================================")
-    safe_print(" Raspberry Pi Hybrid Voice Chatbot")
-    safe_print(" STT: Gemini API")
+    safe_print(" Raspberry Pi Local Voice Chatbot")
+    safe_print(" STT: Local SenseVoice (ONNX)")
     safe_print(" LLM: Local Qwen")
     safe_print(" TTS: edge-tts")
     safe_print(" Convert: ffmpeg mp3 -> wav")
-    safe_print(f" 입력: {INPUT_DEVICE}")
-    safe_print(" 출력: 기본 Bluetooth Speaker")
+    safe_print(f" 입력: {input_label}")
+    safe_print(" 출력: 시스템 기본 스피커 (C-Media USB)")
     safe_print(f" 녹음 시간: {RECORD_SECONDS:g}초")
     safe_print(f" 호출 이름 사용: {REQUIRE_WAKE_NAME}")
     if REQUIRE_WAKE_NAME:
@@ -427,7 +486,7 @@ def main():
         try:
             record_audio(RECORD_SECONDS)
 
-            transcript = transcribe_audio(stt_client)
+            transcript = transcribe_audio(stt_model)
 
             if not transcript:
                 safe_print("[WARN] 인식된 문장이 없습니다.")
