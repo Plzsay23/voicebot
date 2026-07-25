@@ -46,7 +46,7 @@ SENSEVOICE_QUANTIZE = os.getenv("SENSEVOICE_QUANTIZE", "false").lower() in (
 LOCAL_LLM_MODEL_PATH = Path(
     os.getenv(
         "LOCAL_LLM_MODEL_PATH",
-        str(BASE_DIR / "models" / "qwen2.5-0.5b-instruct-q4_k_m.gguf"),
+        str(BASE_DIR / "models" / "EXAONE-3.5-2.4B-Instruct-Q4_K_M.gguf"),
     )
 )
 
@@ -71,23 +71,34 @@ REPLY_MP3_PATH = BASE_DIR / "reply.mp3"
 REPLY_WAV_PATH = BASE_DIR / "reply.wav"
 
 
-# Pi 4B 4GB용 Qwen 속도/품질 타협 설정
-N_CTX = int(os.getenv("N_CTX", "512"))
+# Pi 4B 4GB용 EXAONE-3.5-2.4B 설정 (품질 우선, 속도는 다소 느려도 허용)
+N_CTX = int(os.getenv("N_CTX", "2048"))
 N_THREADS = int(os.getenv("N_THREADS", "4"))
 N_THREADS_BATCH = int(os.getenv("N_THREADS_BATCH", "4"))
 N_BATCH = int(os.getenv("N_BATCH", "128"))
-MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "4"))
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", "60"))
-TEMPERATURE = float(os.getenv("TEMPERATURE", "0.4"))
+MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "6"))
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "256"))
+TEMPERATURE = float(os.getenv("TEMPERATURE", "0.5"))
 TOP_P = float(os.getenv("TOP_P", "0.9"))
-REPEAT_PENALTY = float(os.getenv("REPEAT_PENALTY", "1.08"))
+REPEAT_PENALTY = float(os.getenv("REPEAT_PENALTY", "1.1"))
+
+
+# 웹 검색 (무료 DuckDuckGo, API 키/비용 없음)
+WEB_SEARCH_ENABLED = os.getenv("WEB_SEARCH_ENABLED", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+    "y",
+)
+WEB_SEARCH_RESULTS = int(os.getenv("WEB_SEARCH_RESULTS", "4"))
+WEB_SEARCH_REGION = os.getenv("WEB_SEARCH_REGION", "kr-kr")
 
 
 SYSTEM_PROMPT = (
-    "너는 라즈베리파이 4B에서 실행되는 작은 한국어 음성비서다. "
-    "답변은 짧고 명확하게 한국어로 한다. "
-    "음성으로 듣기 좋게 1~2문장으로 답한다. "
-    "모르면 모른다고 말한다."
+    "너는 한국어 음성비서다. 이름은 제리다. "
+    "친절하고 자연스러운 한국어로 대화한다. "
+    "음성으로 듣기 좋게 핵심을 명확히 답한다. "
+    "모르면 모른다고 솔직히 말한다."
 )
 
 
@@ -280,37 +291,116 @@ def has_wake_name(text: str) -> bool:
     if not BOT_NAME:
         return True
 
-    return normalize_text(BOT_NAME) in normalize_text(text)
+    bot = normalize_text(BOT_NAME)
+    norm = normalize_text(text)
+
+    if not bot:
+        return True
+
+    # 1) 정확 포함
+    if bot in norm:
+        return True
+
+    # 2) 퍼지 매칭: STT가 이름을 자주 오인식(제리->제야/데리/저리)하므로
+    #    발화 앞부분의 짧은 구간과 이름의 문자 유사도로 느슨하게 판단한다.
+    import difflib
+
+    n = len(bot)
+    for i in range(max(1, len(norm))):
+        for w in (n, n + 1):
+            seg = norm[i : i + w]
+            if not seg:
+                continue
+            ratio = difflib.SequenceMatcher(None, seg, bot).ratio()
+            if ratio >= 0.5:
+                return True
+
+    return False
 
 
 def remove_wake_name(text: str) -> str:
     if not BOT_NAME:
         return text.strip()
 
-    result = text.replace(BOT_NAME, "", 1).strip()
-    result = result.lstrip("야아어,.:;!? ")
-    return result.strip()
+    # 정확한 이름이 있으면 그대로 제거
+    if BOT_NAME in text:
+        result = text.replace(BOT_NAME, "", 1).strip()
+        return result.lstrip("야아어,.:;!? ").strip()
+
+    # 오인식된 이름(제리->제야/데리 등)이 첫 어절에 있으면 그 어절만 제거
+    import difflib
+
+    parts = text.strip().split(maxsplit=1)
+    if parts:
+        first = normalize_text(parts[0])
+        bot = normalize_text(BOT_NAME)
+        if bot and difflib.SequenceMatcher(None, first, bot).ratio() >= 0.4:
+            rest = parts[1] if len(parts) > 1 else ""
+            return rest.strip().lstrip("야아어,.:;!? ").strip()
+
+    return text.strip()
 
 
-def build_prompt(history):
-    prompt = (
-        "<|im_start|>system\n"
-        f"{SYSTEM_PROMPT}\n"
-        "<|im_end|>\n"
-    )
+# 웹 검색이 필요해 보이는 발화인지 판단하는 간단한 휴리스틱.
+# 명시적 검색 요청 또는 최신/사실성 정보 신호가 있으면 검색한다.
+SEARCH_TRIGGERS = (
+    "검색",
+    "찾아",
+    "알아봐",
+    "최신",
+    "요즘",
+    "오늘",
+    "지금",
+    "현재",
+    "뉴스",
+    "날씨",
+    "기온",
+    "환율",
+    "주가",
+    "가격",
+    "시세",
+    "며칠",
+    "무슨 요일",
+    "몇 시",
+    "언제",
+    "누구",
+    "어디",
+    "얼마",
+)
 
-    for msg in history:
-        role = msg["role"]
-        content = msg["content"]
 
-        if role == "user":
-            prompt += f"<|im_start|>user\n{content}\n<|im_end|>\n"
-        elif role == "assistant":
-            prompt += f"<|im_start|>assistant\n{content}\n<|im_end|>\n"
+def needs_search(text: str) -> bool:
+    if not WEB_SEARCH_ENABLED:
+        return False
 
-    prompt += "<|im_start|>assistant\n"
+    return any(kw in text for kw in SEARCH_TRIGGERS)
 
-    return prompt
+
+def web_search(query: str) -> str:
+    """무료 DuckDuckGo 검색. 상위 결과 스니펫을 문자열로 반환(실패 시 빈 문자열)."""
+    try:
+        from ddgs import DDGS
+    except Exception as e:
+        safe_print(f"[SEARCH] ddgs 임포트 실패: {e}")
+        return ""
+
+    try:
+        results = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(
+                query,
+                region=WEB_SEARCH_REGION,
+                max_results=WEB_SEARCH_RESULTS,
+            ):
+                title = (r.get("title") or "").strip()
+                body = (r.get("body") or "").strip()
+                if body:
+                    results.append(f"- {title}: {body}")
+
+        return "\n".join(results)
+    except Exception as e:
+        safe_print(f"[SEARCH] 검색 실패: {e}")
+        return ""
 
 
 def trim_history(history):
@@ -321,7 +411,7 @@ def trim_history(history):
 
 
 def load_local_llm():
-    safe_print("[LLM] 로컬 Qwen 모델 로딩 중...")
+    safe_print("[LLM] 로컬 EXAONE 모델 로딩 중...")
     safe_print(f"[LLM] model={LOCAL_LLM_MODEL_PATH.name}")
     safe_print(f"[LLM] n_ctx={N_CTX}, n_threads={N_THREADS}, n_batch={N_BATCH}")
 
@@ -334,7 +424,7 @@ def load_local_llm():
         n_threads_batch=N_THREADS_BATCH,
         n_batch=N_BATCH,
         use_mmap=True,
-        use_mlock=True,
+        use_mlock=False,  # 큰 모델 + STT 동시 로드 시 mlock은 메모리 압박
         verbose=False,
     )
 
@@ -342,36 +432,47 @@ def load_local_llm():
     return llm
 
 
-def ask_local_llm(llm: Llama, history: list[dict], user_text: str):
-    history.append({"role": "user", "content": user_text})
-    history[:] = trim_history(history)
+def build_messages(history, user_text, context=None):
+    system = SYSTEM_PROMPT
 
-    prompt = build_prompt(history)
+    if context:
+        system += (
+            "\n\n아래는 사용자 질문과 관련된 웹 검색 결과다. "
+            "이 정보를 근거로 최신 사실에 맞게 답하라. "
+            "검색 결과에 없는 내용은 지어내지 마라.\n\n"
+            f"[검색 결과]\n{context}"
+        )
 
-    safe_print("[LLM] 로컬 Qwen 답변 생성 중...")
+    messages = [{"role": "system", "content": system}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_text})
+    return messages
+
+
+def ask_local_llm(llm: Llama, history: list[dict], user_text: str, context=None):
+    messages = build_messages(history, user_text, context)
+
+    safe_print("[LLM] 로컬 EXAONE 답변 생성 중...")
 
     t0 = time.time()
 
-    output = llm(
-        prompt,
+    output = llm.create_chat_completion(
+        messages=messages,
         max_tokens=MAX_TOKENS,
         temperature=TEMPERATURE,
         top_p=TOP_P,
         repeat_penalty=REPEAT_PENALTY,
-        stop=[
-            "<|im_end|>",
-            "<|im_start|>user",
-            "<|im_start|>system",
-        ],
     )
 
     elapsed = time.time() - t0
 
-    answer = output["choices"][0]["text"].strip()
+    answer = (output["choices"][0]["message"]["content"] or "").strip()
 
     if not answer:
         answer = "죄송합니다. 답변을 생성하지 못했습니다."
 
+    # 대화 맥락 유지 (검색 컨텍스트는 저장하지 않고 실제 발화만 저장)
+    history.append({"role": "user", "content": user_text})
     history.append({"role": "assistant", "content": answer})
     history[:] = trim_history(history)
 
@@ -461,7 +562,8 @@ def main():
     safe_print("======================================")
     safe_print(" Raspberry Pi Local Voice Chatbot")
     safe_print(" STT: Local SenseVoice (ONNX)")
-    safe_print(" LLM: Local Qwen")
+    safe_print(" LLM: Local EXAONE-3.5-2.4B")
+    safe_print(f" Web Search: {'ON (DuckDuckGo)' if WEB_SEARCH_ENABLED else 'OFF'}")
     safe_print(" TTS: edge-tts")
     safe_print(" Convert: ffmpeg mp3 -> wav")
     safe_print(f" 입력: {input_label}")
@@ -505,7 +607,17 @@ def main():
             if not user_text:
                 user_text = "네, 불렀습니까?"
 
-            answer = ask_local_llm(llm, history, user_text)
+            context = None
+            if needs_search(user_text):
+                safe_print(f"[SEARCH] 웹 검색 중: {user_text}")
+                t0 = time.time()
+                context = web_search(user_text)
+                if context:
+                    safe_print(f"[SEARCH] 결과 확보 ({time.time() - t0:.2f}s)")
+                else:
+                    safe_print("[SEARCH] 결과 없음 (검색 없이 답변)")
+
+            answer = ask_local_llm(llm, history, user_text, context)
 
             synthesize_speech_edge_tts(answer)
 
