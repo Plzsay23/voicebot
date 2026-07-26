@@ -28,6 +28,7 @@ import subprocess
 import sys
 import threading
 import wave
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -74,13 +75,34 @@ def load_manifest(path: Path):
 
 
 def done_counts(records):
-    """문장 index 별로 몇 번 녹음됐는지 센다 (여러 회차 지원)."""
+    """**문장 텍스트** 별로 몇 번 녹음됐는지 센다.
+
+    예전엔 prompts 파일의 줄 번호(index)를 기준으로 셌는데, 대본을 다시
+    생성하면 줄 순서가 바뀌어 엉뚱한 문장을 건너뛰게 된다. 텍스트를 키로 쓰면
+    대본을 갈아끼워도 이미 녹음한 것은 정확히 인식된다.
+    """
     counts = {}
     for r in records:
-        if "index" in r:
-            i = int(r["index"])
-            counts[i] = counts.get(i, 0) + 1
+        t = r.get("text")
+        if t:
+            counts[t] = counts.get(t, 0) + 1
     return counts
+
+
+def next_seq(records, wav_dir):
+    """다음 wav 일련번호. 파일명이 겹쳐 이전 녹음을 덮어쓰는 일이 없게 한다."""
+    n = 0
+    for r in records:
+        stem = Path(r.get("audio_filepath", "")).stem
+        digits = "".join(c for c in stem if c.isdigit())
+        if digits:
+            n = max(n, int(digits) + 1)
+    if wav_dir.exists():
+        for p in wav_dir.glob("*.wav"):
+            digits = "".join(c for c in p.stem if c.isdigit())
+            if digits:
+                n = max(n, int(digits) + 1)
+    return n
 
 
 class Recorder:
@@ -212,15 +234,20 @@ def main():
     print(f"저장 위치: {spk_dir}")
     if args.list:
         for p in range(args.passes):
-            n = sum(1 for i in range(len(prompts)) if counts.get(i, 0) > p)
+            n = sum(1 for t in prompts if counts.get(t, 0) > p)
             print(f"  {p + 1}회차: {n}/{len(prompts)}")
         return 0
 
     # 회차 단위로 돈다. 각 회차에서 아직 그만큼 녹음 안 된 문장만 대상.
+    # 대본에 같은 문장이 두 번 있으면 목표 횟수도 그만큼 늘어난다.
+    remaining = {}
+    for t, n in Counter(prompts).items():
+        remaining[t] = n * args.passes - counts.get(t, 0)
     todo = []
     for p in range(args.passes):
         for i, t in enumerate(prompts):
-            if counts.get(i, 0) <= p:
+            if remaining.get(t, 0) > 0:
+                remaining[t] -= 1
                 todo.append((i, p, t))
     if not todo:
         print(f"\n목표 {target}발화를 모두 채웠습니다. "
@@ -239,6 +266,7 @@ def main():
               "똑같이 읽으면 데이터를 늘린 효과가 없다.\n")
 
     rec = Recorder(device=args.device, sr=args.sr)
+    seq = next_seq(records, wav_dir)
     saved = 0
     warned = []
     try:
@@ -267,9 +295,8 @@ def main():
                     print(f"  ✗ 너무 깁니다({dur:.1f}s). 다시 녹음하세요.")
                     continue
 
-                # 회차별로 파일명을 달리해 이전 회차를 덮어쓰지 않게 한다.
-                name = f"{idx:04d}.wav" if rnd == 0 else f"{idx:04d}_r{rnd}.wav"
-                wav_path = wav_dir / name
+                # 일련번호로 저장한다. 대본 순서가 바뀌어도 기존 파일을 덮지 않는다.
+                wav_path = wav_dir / f"{seq:05d}.wav"
                 write_wav(wav_path, pcm, args.sr)
                 warn = ""
                 if peak < -30:
@@ -304,6 +331,7 @@ def main():
                         "sample_rate": args.sr,
                     }, ensure_ascii=False) + "\n")
                 saved += 1
+                seq += 1
                 break
     except KeyboardInterrupt:
         print("\n중단합니다.")

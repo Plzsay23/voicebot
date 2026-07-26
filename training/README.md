@@ -28,7 +28,10 @@
 
 ```
 training/
-  prompts_ko.txt              읽을 문장 목록 (115개, 자유롭게 편집 가능)
+  prompts_domain.txt          손으로 쓴 도메인 문장 뱅크 (웨이크워드/명령/유사음)
+  build_prompts.py            대본 생성 (PC/서버에서 실행)
+  prompts_ko.txt              ← 자동 생성된 학습용 대본
+  prompts_eval.txt            ← 자동 생성된 평가용 홀드아웃 (학습과 안 겹침)
   record_dataset.py           녹음 도구 (파이에서 실행)
   fetch_open_data.py          공개 데이터셋 받기 (PC에서 실행)
   data/
@@ -44,21 +47,51 @@ training/
 
 ---
 
-## 1. 내 목소리 녹음 (파이에서)
+## 1. 녹음 대본 만들기 (PC/서버에서)
 
-115문장을 3회차까지 녹음해 345발화를 만든다.
+문장을 손으로 "다양하게" 고르면 반드시 발음이 편중된다. 대신 공개 한국어
+코퍼스에서 **음소 커버리지를 최대화하는 문장을 탐욕적으로 골라낸다**(greedy set
+cover). TTS/ASR 대본 설계의 표준 기법이다. 커버리지 단위는 한글을 자모로 쪼갠
+
+| 단위 | 뜻 | 왜 |
+|---|---|---|
+| CV | 초성+중성 | 음절 시작 소리 |
+| VC | 중성+종성 | 받침 |
+| BD | 앞음절 종성 + 다음음절 초성 | 한국어 음운변동(비음화·유음화·경음화)이 일어나는 자리 |
+
+도메인 문장(`prompts_domain.txt`)은 무조건 전부 넣고, **그것들이 못 덮은 구멍만**
+코퍼스 문장으로 메운다. 그래서 같은 분량이라도 손으로 쓴 대본보다 촘촘하다.
+
+```bash
+python3 -m venv .venv-tools && .venv-tools/bin/pip install "datasets>=2.19,<4"
+.venv-tools/bin/python training/build_prompts.py --count 500 --source zeroth
+```
+
+- `--dry-run` 을 붙이면 커버리지 리포트만 보고 파일은 안 쓴다.
+- 네트워크가 없으면 `--count 0` — 도메인 뱅크만으로 대본이 나온다.
+- `fleurs`/`commonvoice` 는 스트리밍이어도 오디오 tar 를 통째로 받아 아주 느리다.
+  `zeroth`(parquet, CC BY 4.0) 하나로 충분하다.
+- **문장을 늘리고 싶으면 `prompts_ko.txt` 가 아니라 `prompts_domain.txt` 를 고친다.**
+  `prompts_ko.txt` 는 생성물이라 다시 만들면 덮인다.
+
+평가용 홀드아웃(`prompts_eval.txt`)이 자동으로 분리돼 나온다. 지난번엔 이게 없어서
+학습에 쓴 문장으로 성능을 재고 "CER 0.008" 같은 무의미한 수치를 얻었다.
+
+## 2. 내 목소리 녹음 (파이에서)
 
 ```bash
 cd ~/voicebot && git pull
-python3 training/record_dataset.py --speaker yjhan --passes 3 --fast
+python3 training/record_dataset.py --speaker yjhan2 --passes 2 --fast
 ```
 
 - 문장이 하나씩 뜬다 → `Enter` 로 녹음 시작 → 읽고 → `Enter` 로 종료 → 자동 저장
 - `--fast` 는 재생·확인 단계를 건너뛴다. 대량 녹음할 때 시간이 절반으로 준다.
   레벨 경고가 뜬 파일은 끝에 목록으로 모아서 알려준다.
 - `q` 로 언제든 중단해도 되고, 다시 실행하면 **이어서** 진행된다.
+  이어녹음 기준은 줄 번호가 아니라 **문장 텍스트**라, 대본을 다시 생성해
+  순서가 바뀌어도 이미 녹음한 것을 정확히 알아본다.
 - 앞뒤 무음은 자동으로 잘린다.
-- 진행 상황만 보려면 `--passes 3 --list`.
+- 진행 상황만 보려면 `--passes 2 --list`.
 
 **녹음 요령**
 
@@ -68,25 +101,28 @@ python3 training/record_dataset.py --speaker yjhan --passes 3 --fast
   2회차는 조금 빠르게/멀리서, 3회차는 편하게 흘리듯이 — 이런 식으로.
 - 평소 쓰는 환경 그대로.
 
-**분량 기준**
+**분량 기준** (대본 500문장 = 학습 425 + 홀드아웃 75 기준)
 
 | 분량 | 기대 효과 |
 |---|---|
-| 115발화 (1회차) | 웨이크워드 인식률 개선을 확인할 수 있는 최소선 |
-| **345발화 (3회차, 약 45~60분)** | 도메인 특화 효과가 뚜렷해지는 실용 지점 ← **목표** |
-| 1000발화 이상 | 더 좋지만 수집 비용 대비 효과는 완만해짐 |
+| 425발화 (1회차, 약 70분) | 최소선 |
+| **850발화 (2회차, 약 2시간)** | 도메인 특화가 확실히 걸리는 지점 ← **목표** |
+| 3회차 이상 | 같은 문장을 또 읽는 것보다 `--count` 를 키워 문장을 늘리는 게 낫다 |
+
+**여러 날에 나눠 녹음하는 게 오히려 좋다.** 같은 자리에서 몰아 녹음하면 목 상태와
+마이크 위치가 고정돼 데이터 다양성이 떨어진다. 이어녹음이 되니 나눠 해도 된다.
 
 ### 평가 전용 데이터 (중요)
 
-학습에 쓴 발화로 성능을 재면 당연히 잘 나온다(외운 것). 진짜 실력을 보려면
-**학습에 안 쓴 발화**가 따로 있어야 한다. 화자 이름을 달리해 한 벌 더 받는다:
+학습에 쓴 발화로 성능을 재면 당연히 잘 나온다(외운 것). `build_prompts.py` 가
+겹치지 않는 홀드아웃 대본을 따로 만들어 두므로 그걸로 한 벌 더 받는다:
 
 ```bash
-python3 training/record_dataset.py --speaker yjhan_eval --passes 1
+python3 training/record_dataset.py --prompts training/prompts_eval.txt --speaker yjhan2_eval --passes 1
 ```
 
 이건 `--fast` 없이 확인하며 천천히 받는 게 좋다. 학습 때
-`prepare_funasr_data.py --data data/yjhan` 만 넘기면 `yjhan_eval` 은 자연히 빠진다.
+`prepare_funasr_data.py --data data/yjhan2` 만 넘기면 `yjhan2_eval` 은 자연히 빠진다.
 
 ### 잡음 녹음 (증강용)
 
@@ -103,7 +139,7 @@ bash ~/voicebot/scripts/record_noise.sh 무음 30
 
 ---
 
-## 2. 공개 한국어 데이터 (GPU 서버에서)
+## 3. 공개 한국어 데이터 (GPU 서버에서)
 
 내 목소리 데이터만으로 학습하면 모델이 원래 알던 한국어를 잊어버린다
 (catastrophic forgetting). 공개 데이터를 3~10배 정도 섞어서 함께 학습한다.
@@ -126,7 +162,7 @@ python training/fetch_open_data.py --dataset zeroth --hours 3
 
 ---
 
-## 3. 학습 실행
+## 4. 학습 실행
 
 학습은 이 PC가 아니라 **학교/연구실 리눅스 GPU 서버**에서 돌린다.
 전체 절차(환경 구성 → 학습 → ONNX 변환 → 파이 배포 → 성능 비교)는
@@ -134,6 +170,7 @@ python training/fetch_open_data.py --dataset zeroth --hours 3
 
 | 스크립트 | 실행 위치 | 용도 |
 |---|---|---|
+| `build_prompts.py` | PC/서버 | 녹음 대본 생성 (음소 커버리지 최적화) |
 | `record_dataset.py` | 파이 | 녹음 |
 | `eval_stt.py` | 파이 | 정확도 측정 (학습 전/후 비교) |
 | `fetch_open_data.py` | 서버 | 공개 한국어 데이터 받기 |
