@@ -63,14 +63,27 @@ wc -l ~/voicebot/training/data/yjhan/manifest.jsonl && ls ~/voicebot/training/da
 GPU 노드에서 실행한다. 로그인 노드에 GPU가 없는 클러스터라면 먼저 잡을
 할당받을 것(`srun --gres=gpu:1 --pty bash` 등, 학교마다 다름).
 
+**conda 를 쓴다면** (서버 파이썬 버전을 안 건드려도 되니 이쪽이 무난하다):
+
+```bash
+cd ~/voicebot/training && bash setup_train_env_conda.sh
+```
+
+`voicebot-train` 환경(python 3.10)이 생긴다. 이후 작업은 `conda activate voicebot-train`.
+
+**venv 를 쓴다면:**
+
 ```bash
 cd ~/voicebot/training && bash setup_train_env.sh
 ```
 
 - 파이썬 3.9~3.11 을 자동으로 찾는다. 없으면 `module avail python` 으로 찾아
   `module load` 한 뒤 다시 실행한다.
-- 드라이버 버전을 보고 torch 빌드(cu118/cu121/cu128)를 자동 선택한다.
-  잘못 골랐으면 `CUDA_TAG=cu121 bash setup_train_env.sh` 로 지정한다.
+- 둘 다 드라이버 버전을 보고 torch 빌드(cu118/cu121/cu126/cu128)를 자동 선택한다.
+  잘못 골랐으면 `CUDA_TAG=cu126 bash setup_train_env_conda.sh` 처럼 지정한다.
+  **CUDA 12.6 서버면 `cu126`** 이다(드라이버 560번대 → 자동으로 골라진다).
+- conda 로 `cuda-toolkit` 을 따로 깔 필요는 없다. pip 의 torch 휠이 CUDA 런타임을
+  들고 있어서 서버엔 드라이버만 있으면 된다.
 - 마지막에 **GPU 연산 테스트까지 통과**해야 넘어간다. 여기서 실패하면
   torch 빌드와 GPU가 안 맞는 것이니 CUDA_TAG 를 바꿔서 재설치한다.
 
@@ -80,7 +93,7 @@ cd ~/voicebot/training && bash setup_train_env.sh
 
 ```bash
 cd ~/voicebot/training
-source venv/bin/activate
+conda activate voicebot-train      # venv 판이면 source venv/bin/activate
 python prepare_funasr_data.py --data data/yjhan
 ```
 

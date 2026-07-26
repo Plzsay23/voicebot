@@ -24,8 +24,15 @@ GPUS="${GPUS:-0}"
 info() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 
-[[ -f venv/bin/activate ]] || die "venv 가 없다. 먼저 'bash setup_train_env.sh' 실행."
-source venv/bin/activate
+# venv 판이면 여기서 활성화하고, conda 판이면 이미 활성화된 환경을 그대로 쓴다.
+if [[ -f venv/bin/activate ]]; then
+  source venv/bin/activate
+elif python -c 'import funasr' 2>/dev/null; then
+  info "현재 파이썬 환경 사용: $(which python)"
+else
+  die "학습 환경이 없다. 'bash setup_train_env.sh' (venv) 또는
+      'bash setup_train_env_conda.sh' 후 'conda activate voicebot-train' 을 먼저 할 것."
+fi
 
 [[ -f "$DATA/train.jsonl" ]] || die "$DATA/train.jsonl 이 없다. prepare_funasr_data.py 를 먼저 실행."
 N_TRAIN=$(wc -l < "$DATA/train.jsonl")

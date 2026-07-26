@@ -139,5 +139,6 @@ python training/fetch_open_data.py --dataset zeroth --hours 3
 | `fetch_open_data.py` | 서버 | 공개 한국어 데이터 받기 |
 | `prepare_funasr_data.py` | 서버 | 학습 포맷 변환 + 잡음 증강 |
 | `setup_train_env.sh` | 서버 | venv + torch + funasr 설치 |
+| `setup_train_env_conda.sh` | 서버 | 같은 것의 conda 판 (환경 `voicebot-train`) |
 | `finetune_sensevoice.sh` | 서버 | 파인튜닝 |
 | `export_onnx.py` | 서버 | ONNX int8 변환 + 로드 검증 |
