@@ -318,6 +318,9 @@ def main():
                         wav_path.unlink(missing_ok=True)
                         break
                     if ans == "q":
+                        # manifest 에 안 들어간 wav 를 남기지 않는다.
+                        # 남기면 폴더에만 있는 고아 파일이 되어 헷갈린다.
+                        wav_path.unlink(missing_ok=True)
                         raise KeyboardInterrupt
 
                 with manifest.open("a", encoding="utf-8") as f:

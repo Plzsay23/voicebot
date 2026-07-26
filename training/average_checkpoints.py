@@ -35,6 +35,23 @@ def load_ckpt(path: Path):
     return None, obj
 
 
+def ckpt_order(path: Path):
+    """model.pt.ep{N}[.{step}] 을 (epoch, step) 으로 정렬한다.
+
+    학습 스텝이 save_checkpoint_interval 을 넘으면 FunASR 이 epoch 중간
+    체크포인트(model.pt.ep18.200)를 남긴다. 데이터가 적을 땐 안 생기다가
+    늘어나면 생기기 때문에, 뒤 숫자를 통째로 int() 하면 그때부터 죽는다.
+    epoch 끝(model.pt.ep18)은 그 epoch 의 중간 저장들보다 뒤로 놓는다.
+    """
+    tail = path.name.split("ep")[-1]
+    head, _, step = tail.partition(".")
+    try:
+        epoch = int(head)
+    except ValueError:
+        return (-1, -1)
+    return (epoch, int(step) if step.isdigit() else 10 ** 9)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("ckpts", type=Path, nargs="*", help="평균낼 체크포인트들")
@@ -50,8 +67,7 @@ def main():
         if not args.dir:
             print("--last 를 쓰려면 --dir 도 줘야 한다.")
             return 1
-        eps = sorted(args.dir.glob("model.pt.ep*"),
-                     key=lambda p: int(p.name.split("ep")[-1]))
+        eps = sorted(args.dir.glob("model.pt.ep*"), key=ckpt_order)
         ckpts = eps[-args.last:]
 
     ckpts = [p for p in ckpts if p.exists()]
