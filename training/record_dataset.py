@@ -85,18 +85,28 @@ class Recorder:
         self.chunks = []
         self.thread = None
         self.stop_flag = threading.Event()
+        self.first_chunk = threading.Event()
 
     def start(self):
+        """실제로 오디오가 흐르기 시작한 뒤에 리턴한다.
+
+        마이크 소스가 SUSPENDED 상태면(특히 DeepFilterMic 같은 필터체인 노드)
+        parecord 를 띄우고도 첫 데이터가 나오기까지 1초 이상 걸린다. 그걸
+        기다리지 않고 사용자에게 "말하세요"라고 하면 발화 앞부분이 통째로 날아간다.
+        """
         cmd = ["parecord", f"--rate={self.sr}", "--channels=1",
                "--format=s16le", "--raw"]
         if self.device:
             cmd.append(f"--device={self.device}")
         self.chunks = []
         self.stop_flag.clear()
+        self.first_chunk.clear()
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL)
         self.thread = threading.Thread(target=self._read_loop, daemon=True)
         self.thread.start()
+        if not self.first_chunk.wait(timeout=5.0):
+            print("  ⚠ 마이크에서 데이터가 안 옵니다. 장치를 확인하세요.")
 
     def _read_loop(self):
         while not self.stop_flag.is_set():
@@ -104,9 +114,11 @@ class Recorder:
             if not data:
                 break
             self.chunks.append(data)
+            self.first_chunk.set()
 
     def stop(self) -> bytes:
-        self.stop_flag.set()
+        # terminate 먼저 하고 읽기 스레드가 EOF까지 읽게 둔다. stop_flag 를 먼저
+        # 세우면 파이프에 남은 마지막 조각(최대 128ms)을 버리게 된다.
         if self.proc:
             self.proc.terminate()
             try:
@@ -115,6 +127,7 @@ class Recorder:
                 self.proc.kill()
         if self.thread:
             self.thread.join(timeout=2)
+        self.stop_flag.set()
         return b"".join(self.chunks)
 
 

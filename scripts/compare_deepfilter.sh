@@ -24,18 +24,35 @@ echo
 
 countdown() { for i in 3 2 1; do printf '  %d...\r' "$i"; sleep 1; done; printf '  ● 녹음!  \n'; }
 
+# 소스가 SUSPENDED 상태면 실제로 소리가 흐르기까지 1초 이상 걸린다. 벽시계로
+# 재서 끊으면 그만큼 뒷부분이 잘리므로, 파일이 목표 길이만큼 쌓일 때까지 기다린다.
+TARGET_BYTES=$(( DUR * 16000 * 2 ))
+record() {  # record <device> <파일>
+  local dev="$1" out="$2" waited=0
+  parecord --device="$dev" --rate=16000 --channels=1 --format=s16le \
+           --file-format=wav "$out" &
+  local pid=$!
+  # 첫 데이터가 들어올 때까지 대기(소스 깨어나는 시간) — 카운트다운은 이미 끝났으므로
+  # 여기서 기다린 만큼은 녹음 길이에 포함되지 않는다.
+  while [[ ! -s "$out" ]] && (( waited < 100 )); do sleep 0.1; ((waited++)); done
+  while (( $(stat -c%s "$out" 2>/dev/null || echo 0) < TARGET_BYTES )) \
+        && (( waited < 100 + DUR * 20 )); do sleep 0.1; ((waited++)); done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
 info "[1/2] 원본 (잡음 제거 없음) — ${DUR}초"
 countdown
-parecord --device="$ORIG" --rate=16000 --channels=1 --format=s16le \
-         --file-format=wav "$OUT/before.wav" &
-sleep "$DUR"; kill %1 2>/dev/null || true; wait 2>/dev/null || true
+record "$ORIG" "$OUT/before.wav"
 
 echo
 info "[2/2] DeepFilter 적용 — ${DUR}초"
 countdown
-parecord --device=DeepFilterMic --rate=16000 --channels=1 --format=s16le \
-         --file-format=wav "$OUT/after.wav" &
-sleep "$DUR"; kill %1 2>/dev/null || true; wait 2>/dev/null || true
+record DeepFilterMic "$OUT/after.wav"
+
+for f in "$OUT/before.wav" "$OUT/after.wav"; do
+  python3 -c "import wave,sys; w=wave.open(sys.argv[1]); print('    %s  %.2fs' % (sys.argv[1], w.getnframes()/w.getframerate()))" "$f" 2>/dev/null || true
+done
 
 echo
 info "재생: 원본"; paplay "$OUT/before.wav"
