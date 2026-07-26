@@ -37,6 +37,29 @@ AUX_FILES = [
 ]
 
 
+def find_in_model_cache(name: str):
+    """원본 SenseVoiceSmall 다운로드 캐시에서 부속 파일을 찾는다.
+
+    bpe 모델·am.mvn 같은 건 파인튜닝 산출물에는 안 생기고 원본 모델에만 있다.
+    modelscope 와 huggingface 캐시 위치가 환경마다 달라서 몇 군데를 훑는다.
+    """
+    roots = [
+        Path.home() / ".cache/modelscope/hub",
+        Path.home() / ".cache/modelscope",
+        Path.home() / ".cache/huggingface/hub",
+        Path.home() / ".cache/huggingface",
+    ]
+    for root in roots:
+        if not root.exists():
+            continue
+        # SenseVoice 폴더를 우선 보고, 없으면 캐시 전체를 훑는다.
+        hits = sorted(root.rglob(f"*SenseVoice*/**/{name}")) or sorted(root.rglob(name))
+        if hits:
+            print(f"    (캐시에서 찾음: {hits[0]})")
+            return hits[0]
+    return None
+
+
 def find_checkpoint(model_dir: Path) -> Path:
     """학습 산출물 폴더에서 쓸 체크포인트를 고른다 (평균 모델 우선)."""
     for name in ("model.pt.avg5", "model.pt.avg10"):
@@ -134,6 +157,10 @@ def main():
                       if p.exists()), None)
         if found is None:
             found = next(iter(args.model_dir.rglob(name)), None)
+        if found is None:
+            # bpe 모델 같은 건 학습 산출물이 아니라 원본 SenseVoiceSmall 에
+            # 딸려온다. 다운로드 캐시에서 찾는다.
+            found = find_in_model_cache(name)
         if found is None:
             missing.append(name)
             continue
