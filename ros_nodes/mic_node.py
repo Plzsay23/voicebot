@@ -68,7 +68,13 @@ class MicNode(Node):
         super().__init__("mic_node")
         self.pub = self.create_publisher(String, "/voice/utterance_path", 10)
         self.create_subscription(Bool, "/voice/speaking", self.on_speaking, 10)
+        # speaking(재생 중) 만으로는 부족하다. 파이4 에서 EXAONE 이 답을 만드는
+        # 20~30초 동안은 아직 재생이 시작되지 않아 마이크가 열려 있었고, 그 사이
+        # 들어온 말이 전부 큐에 쌓였다가 답변이 끝나자마자 줄줄이 처리됐다.
+        # dialog_node 가 웨이크워드를 받아들인 순간부터 busy 를 올린다.
+        self.create_subscription(Bool, "/voice/busy", self.on_busy, 10)
         self.speaking = False
+        self.busy = False
         self.utt_idx = 0
         UTT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -84,6 +90,11 @@ class MicNode(Node):
 
     def on_speaking(self, msg: Bool):
         self.speaking = msg.data
+
+    def on_busy(self, msg: Bool):
+        if msg.data != self.busy:
+            self.get_logger().info("마이크 닫음(응답 처리 중)" if msg.data else "마이크 다시 열림")
+        self.busy = msg.data
 
     def capture_loop(self):
         buf = b""
@@ -104,8 +115,8 @@ class MicNode(Node):
                 frame = buf[:FRAME_BYTES]
                 buf = buf[FRAME_BYTES:]
 
-                if self.speaking:
-                    # TTS 재생 중: 캡처 무시 + 상태 리셋
+                if self.speaking or self.busy:
+                    # 응답 생성 중이거나 TTS 재생 중: 캡처 무시 + 상태 리셋
                     in_speech = False
                     voiced = []
                     hang = 0
