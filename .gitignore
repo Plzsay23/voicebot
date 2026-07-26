@@ -12,3 +12,6 @@ __pycache__/
 
 # 런타임 생성물
 _stt_warmup.wav
+
+# 학습 데이터 (용량 큼 — 녹음 파일은 로컬/파이에만 둔다)
+training/data/
