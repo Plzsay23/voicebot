@@ -15,75 +15,108 @@ tags:
 - raspberry-pi
 ---
 
-# SenseVoiceSmall 한국어 파인튜닝 (웨이크워드 "제리")
+# SenseVoiceSmall fine-tuned for Korean (wake word "제리" / Jerry)
 
-라즈베리파이 4B 음성비서용으로 [SenseVoiceSmall](https://huggingface.co/FunAudioLLM/SenseVoiceSmall)
-을 파인튜닝한 뒤 ONNX int8 로 변환한 모델이다.
+A fine-tune of [SenseVoiceSmall](https://huggingface.co/FunAudioLLM/SenseVoiceSmall),
+exported to ONNX so it runs on a Raspberry Pi 4B voice assistant. Both the fp32
+export and an int8 quantized version are here.
 
-## 왜 만들었나
+## Why this exists
 
-원본 SenseVoiceSmall 은 한국어 일반 어휘를 잘 알아듣는데 **웨이크워드 "제리"만
-못 알아들었다.** 파인튜닝 전 30발화 측정에서 오류 13개 중 11개가 "제리" 였고,
-"제야"(7회), "재이", "젤리", "젤이", "데야" 로 잘못 들었다. 반면 "삼성전자",
-"비트코인 시세", "무슨 요일이야" 같은 어휘는 거의 다 맞혔다.
+The base model already handles everyday Korean just fine. The problem was one
+word: the wake word **"제리"**. In a 30-utterance baseline, 11 of the 13 errors
+were that single word — it kept coming out as "제야" (7 times), "재이", "젤리",
+"젤이", "데야". Meanwhile it happily nailed things like "삼성전자",
+"비트코인 시세", and "무슨 요일이야".
 
-| 지표 | 파인튜닝 전 |
+So this isn't a "make Korean ASR better" model. It's a "make one stubborn wake
+word work on my hardware, in my voice" model.
+
+| Baseline (before fine-tuning) | |
 |---|---|
 | CER | 0.096 |
-| 완전일치 | 17/30 (56.7%) |
-| 웨이크워드 인식 | 28/30 (93.3%) |
-| 평균 추론(파이4) | 0.71초 |
+| Exact match | 17/30 (56.7%) |
+| Wake word detected | 28/30 (93.3%) |
+| Avg inference on Pi 4 | 0.71 s |
 
-<!-- 파인튜닝 후 수치는 eval_stt.py --compare 결과로 채울 것 -->
+<!-- Fill in post-fine-tune numbers from the 75-sentence holdout. -->
 
-## 학습 데이터
+## Training data (round 2)
 
-한국어 화자 1명의 자체 녹음 345발화. 16kHz mono, 라즈베리파이에 연결된
-ReSpeaker Lite USB 마이크로 녹음했다. 문장 목록은 웨이크워드와 음성비서가
-실제로 받는 명령어(날씨·시간·검색·타이머 등)로 구성했다.
-학습은 20 epoch(val loss 0.693 → 0.645), 마지막 5개 체크포인트를 평균냈다.
+| Source | Amount |
+|---|---|
+| Own recordings (1 speaker) | 425 sentences × 2 passes = **850 utterances / 57 min** |
+| Noise-augmented copies | 850 (mouse, keyboard, mic self-noise; SNR 5–20 dB) |
+| Zeroth-Korean audio | 1,119 utterances / 3 h |
+| **Total for training** | 3,119 rows / 299 min (plus 550 held out for validation) |
 
-**읽은 문장의 출처:** 웨이크워드·명령어·유사음 문장은 직접 작성했고, 일반
-한국어 문장은 [Zeroth-Korean](https://huggingface.co/datasets/Bingsu/zeroth-korean)
-(CC BY 4.0)의 전사 텍스트에서 음소 커버리지 기준으로 골라 **직접 읽어 녹음**했다.
-Zeroth 의 오디오는 사용하지 않았다.
+Recordings are 16 kHz mono, captured through the ReSpeaker Lite USB mic attached
+to the Pi. That part matters more than it sounds — training on audio that came
+through a different mic than the one you'll actually use throws away most of the
+benefit. Each sentence was read twice with deliberately different pace, tone, and
+mic distance; the two takes differ by about 25% in length at the median, so the
+second pass is real data rather than a copy.
 
-## 한계 — 읽고 쓸 것
+20 epochs, val loss 7.19 → 1.29 (flat after epoch 16). The last 5 checkpoints
+were averaged.
 
-- **화자 특화 모델이다.** 한 사람 목소리로 학습해서 다른 화자에겐 원본보다
-  나쁠 수 있다. 범용 한국어 STT 를 찾는다면 원본 SenseVoiceSmall 을 쓰는 게 낫다.
-- **"제리"라는 특정 웨이크워드에 맞춰져 있다.** 다른 호출어를 쓸 거면 그대로
-  가져다 쓸 이유가 없다.
-- **공개 한국어 코퍼스를 섞지 않았다.** 이 모델은 위 345발화만으로 학습됐고,
-  그래서 원본이 알던 일반 한국어를 일부 잊었을 수 있다(catastrophic forgetting).
-  학습 문장에 없는 어휘에서 원본보다 나쁠 가능성을 염두에 두고 쓸 것.
+**How the sentences were chosen.** Picking sentences by hand always ends up
+phonetically lopsided, so instead the script greedily selects sentences that
+maximize phoneme coverage — set cover over three units: onset+nucleus,
+nucleus+coda, and coda→next-onset (where most Korean phonological alternation
+happens). The pool of general Korean sentences comes from the
+[Zeroth-Korean](https://huggingface.co/datasets/Bingsu/zeroth-korean)
+transcripts (CC BY 4.0). Wake-word phrases, real commands, and near-homophone
+negatives ("체리", "저리", "처리", "자리", "소리"…) were written by hand, since
+no corpus contains those.
 
-## 쓰는 법
+The 75-sentence holdout shares **zero** sentences with the training set. The
+previous round had no holdout at all, which made its numbers meaningless.
+
+## Things you should know before using this
+
+- **It's speaker-specific.** One person's voice, one microphone. On other
+  speakers it may well be worse than the base model. If you want general-purpose
+  Korean ASR, use the original SenseVoiceSmall.
+- **It's tuned for the wake word "제리".** Different wake word, no reason to
+  reach for this.
+- **Public corpus audio is mixed in this time** (3 h of Zeroth), which should
+  limit catastrophic forgetting — but only one speaker's data got the noise
+  augmentation and the 2× repetition, so expect some drift on general Korean.
+
+## Usage
 
 ```python
 from funasr_onnx import SenseVoiceSmall
 
-model = SenseVoiceSmall("경로/sensevoice_ko_ft", batch_size=1, quantize=True)
+model = SenseVoiceSmall("path/to/sensevoice_ko_ft", batch_size=1, quantize=True)
 print(model(["input.wav"], language="ko", use_itn=True))
 # ['<|ko|><|NEUTRAL|><|Speech|><|woitn|>제리']
 ```
 
-폴더에 `model_quant.onnx` 외에 `config.yaml`, `am.mvn`,
-`chn_jpn_yue_eng_ko_spectok.bpe.model` 이 함께 있어야 로드된다.
+The loader reads a *folder*, not a single file. Alongside the ONNX you need
+`config.yaml`, `am.mvn`, and `chn_jpn_yue_eng_ko_spectok.bpe.model` — the last
+one isn't a training artifact, it ships with the original SenseVoiceSmall.
 
-| 파일 | 크기 |
+| File | Size |
 |---|---|
-| `model.onnx` (fp32) | 897MB |
-| `model_quant.onnx` (int8, MatMul) | 230MB |
+| `model.onnx` (fp32) | ~900 MB |
+| `model_quant.onnx` (int8, MatMul only) | ~240 MB |
 
-양자화는 MatMul 연산만 int8 로 돌렸다. ARM Cortex-A72 에서는 전체 op 를
-양자화하는 것보다 이쪽이 안정적이고 빠르다.
+Only MatMul ops are quantized. Quantizing everything makes the file marginally
+smaller but tends to run *slower* on ARM Cortex-A72, where the extra
+quantize/dequantize traffic isn't worth it. If you're on x86, measure for
+yourself — the tradeoff is different there.
 
-## 라이선스와 출처
+## License and credit
 
-원본 [iic/SenseVoiceSmall](https://huggingface.co/FunAudioLLM/SenseVoiceSmall)
-의 파생물이며 **FunASR Model Open Source License Agreement** 를 따른다.
-전문은 [MODEL_LICENSE](https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE) 참고.
-SenseVoice 코드 자체는 MIT 다.
+Derived from [iic/SenseVoiceSmall](https://huggingface.co/FunAudioLLM/SenseVoiceSmall)
+and covered by the **FunASR Model Open Source License Agreement**
+([full text](https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE)).
+The SenseVoice *code* is MIT; the weights are not — worth reading before you
+redistribute anything built on this.
 
-학습·변환 스크립트: https://github.com/Plzsay23/voicebot (`training/`)
+Sentence text from Zeroth-Korean (CC BY 4.0). The audio in this training set was
+recorded by me; Zeroth's own audio was used as-is for the 3 h mix-in.
+
+Training and export scripts: https://github.com/Plzsay23/voicebot (`training/`)
