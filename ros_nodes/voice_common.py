@@ -75,6 +75,11 @@ PIPER_DATA_DIR = Path(os.getenv("PIPER_DATA_DIR", str(BASE_DIR / "models" / "pip
 # 문장 사이 무음(초). 스트리밍에서 문장을 따로 합성하므로 0 이면 붙어 들린다.
 PIPER_SENTENCE_SILENCE = float(os.getenv("PIPER_SENTENCE_SILENCE", "0.2"))
 
+# 재생 음량 배수. 두 백엔드 공통(합성 후 ffmpeg 단계에서 적용).
+# 시스템 볼륨을 건드리지 않으므로 다른 소리(경고음 등)에는 영향이 없다.
+# 1.0 이 원본. 너무 낮추면 에코 억제엔 유리하지만 잘 안 들린다.
+TTS_VOLUME = float(os.getenv("TTS_VOLUME", "0.7"))
+
 # 문장이 이 길이보다 짧으면 다음 문장과 합쳐서 TTS로 보낸다.
 # edge-tts 는 문장마다 네트워크 왕복이 있어서 "네." 같은 조각을 따로 보내면
 # 합성 오버헤드가 발화 길이보다 커진다. piper 는 로컬이라 그 비용이 없으므로
@@ -364,12 +369,12 @@ def piper_available() -> bool:
 
 
 def _resample_to_output(src: Path, out_wav: Path):
-    """스피커 싱크에 맞춰 48k 스테레오로 맞춘다(기존 재생 경로와 동일)."""
-    subprocess.run(
-        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-         "-i", str(src), "-ar", "48000", "-ac", "2", str(out_wav)],
-        check=True,
-    )
+    """스피커 싱크에 맞춰 48k 스테레오로 맞추고 음량을 적용한다."""
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(src)]
+    if abs(TTS_VOLUME - 1.0) > 1e-3:
+        cmd += ["-filter:a", f"volume={TTS_VOLUME}"]
+    cmd += ["-ar", "48000", "-ac", "2", str(out_wav)]
+    subprocess.run(cmd, check=True)
 
 
 def _synthesize_piper(text: str, out_wav: Path):
