@@ -49,6 +49,21 @@ REPEAT_PENALTY = float(os.getenv("REPEAT_PENALTY", "1.1"))
 
 BOT_NAME = os.getenv("BOT_NAME", "제리").strip()
 
+# 웨이크워드 퍼지 매칭 임계값.
+#
+# 0.5 였다. 원본 SenseVoice 가 "제리"를 "제야/재이/젤리"로 흘려 듣던 시절,
+# 그걸 건져내려고 느슨하게 잡아둔 값이다. 파인튜닝 후에는 STT 가 "제리"를
+# 글자 그대로 받아 적으므로(홀드아웃 23/23) 그 보상책이 손해만 남긴다.
+#
+# 2026-07-27 홀드아웃 75발화 실측 — 재현율 / 오검출:
+#     0.5   파인튜닝 100% / 23.1%(52개 중 12개)   ← 아무 말에나 깨어난다
+#     0.6   파인튜닝 100% /  0.0%                  ← 채택
+#   "처리가 완료되었습니다", "거리가 얼마나 되나요", "제조 일자를 확인해 보세요"
+#   같은 문장이 0.5 에서 전부 통과했다.
+#
+# 원본 모델로 되돌린다면 0.5 로 낮춰야 한다(0.6 에서 재현율 69.6%로 떨어진다).
+WAKE_MATCH_RATIO = float(os.getenv("WAKE_MATCH_RATIO", "0.6"))
+
 EDGE_TTS_VOICE = os.getenv("EDGE_TTS_VOICE", "ko-KR-SunHiNeural")
 
 WEB_SEARCH_ENABLED = os.getenv("WEB_SEARCH_ENABLED", "true").lower() in (
@@ -85,14 +100,14 @@ def has_wake_name(text: str) -> bool:
         return True
     if bot in norm:
         return True
-    # STT 오인식(제리->제야/데리/저리) 대비 퍼지 매칭
+    # STT 오인식 대비 퍼지 매칭. 임계값은 STT 성능에 맞춰 조정해야 한다.
     n = len(bot)
     for i in range(max(1, len(norm))):
         for w in (n, n + 1):
             seg = norm[i:i + w]
             if not seg:
                 continue
-            if difflib.SequenceMatcher(None, seg, bot).ratio() >= 0.5:
+            if difflib.SequenceMatcher(None, seg, bot).ratio() >= WAKE_MATCH_RATIO:
                 return True
     return False
 

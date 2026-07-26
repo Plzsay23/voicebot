@@ -77,8 +77,12 @@ def main():
         ref = r["text"]
         e = cer(ref, hyp)
         exact = vc.normalize_text(ref) == vc.normalize_text(hyp)
-        # 정답에 웨이크워드가 있는 발화만 웨이크워드 지표에 센다
-        wake_expected = vc.has_wake_name(ref)
+        # 정답 판정에는 퍼지 매칭을 쓰면 안 된다. has_wake_name(ref) 로 재면
+        # "처리가/거리가/제조" 같은 유사음 네거티브가 통째로 웨이크워드 풀로
+        # 넘어가서, 인식률은 100% 로 부풀고 오검출은 23% -> 2% 로 축소된다.
+        # (2026-07-27 확인: 실제 23/52 를 34/41 로 잘못 나누고 있었다.)
+        # 정답은 글자 그대로 들어있는지로만 본다.
+        wake_expected = vc.normalize_text(vc.BOT_NAME) in vc.normalize_text(ref)
         wake_got = vc.has_wake_name(hyp)
         results.append({"file": r["audio_filepath"], "ref": ref, "hyp": hyp,
                         "cer": e, "exact": exact,
