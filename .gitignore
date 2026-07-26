@@ -15,3 +15,8 @@ _stt_warmup.wav
 
 # 학습 데이터 (용량 큼 — 녹음 파일은 로컬/파이에만 둔다)
 training/data/
+
+# 학습 전용 venv (PC 로컬, 파이엔 없음)
+.venv-train/
+training/funasr_data/
+training/*.json
