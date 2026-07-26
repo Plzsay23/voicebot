@@ -94,18 +94,18 @@ py training/fetch_open_data.py --dataset zeroth --hours 3
 
 ---
 
-## 3. 이후 단계 (아직 미구현)
+## 3. 학습 실행
 
-3. 학습 데이터 병합 + train/val 분리 스크립트
-4. SenseVoiceSmall 파인튜닝 (FunASR, 이 PC의 CUDA)
-5. 파인튜닝 결과 → ONNX export → int8 양자화 → 파이 배포
-6. 기존 모델 대비 정확도/속도 A-B 비교
+학습은 이 PC가 아니라 **학교/연구실 리눅스 GPU 서버**에서 돌린다.
+전체 절차(환경 구성 → 학습 → ONNX 변환 → 파이 배포 → 성능 비교)는
+[TRAINING.md](TRAINING.md) 에 있다.
 
-### 미리 알아둘 위험 요소
-
-- **ONNX export 경로 확인 필요.** 파이가 쓰는 건 `funasr_onnx` 런타임이라,
-  파인튜닝한 파이토치 모델을 다시 ONNX 로 뽑고 int8 양자화까지 성공해야 배포가 된다.
-  이 경로가 막히면 추론 속도(현재 0.4~0.5초)를 지키기 어려울 수 있다.
-  **데이터 수집을 많이 하기 전에 4~5단계를 소량 데이터로 먼저 뚫어보는 것을 권장한다.**
-- 데이터 포맷은 모델과 무관하게 만들었으므로, 설령 모델을 whisper 계열 등으로
-  바꾸더라도 녹음한 데이터는 그대로 재사용할 수 있다.
+| 스크립트 | 실행 위치 | 용도 |
+|---|---|---|
+| `record_dataset.py` | 파이 | 녹음 |
+| `eval_stt.py` | 파이 | 정확도 측정 (학습 전/후 비교) |
+| `fetch_open_data.py` | 서버 | 공개 한국어 데이터 받기 |
+| `prepare_funasr_data.py` | 서버 | 학습 포맷 변환 + 잡음 증강 |
+| `setup_train_env.sh` | 서버 | venv + torch + funasr 설치 |
+| `finetune_sensevoice.sh` | 서버 | 파인튜닝 |
+| `export_onnx.py` | 서버 | ONNX int8 변환 + 로드 검증 |
