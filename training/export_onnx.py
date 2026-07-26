@@ -70,8 +70,15 @@ def find_checkpoint(model_dir: Path) -> Path:
     # 평균 모델은 학습이 끝까지 갔을 때만 만들어진다. 없다는 건 학습이
     # 중간에 끊겼다는 뜻이라 성능이 덜 나온다. 진행은 시키되 경고한다.
     fallback = model_dir / "model.pt"
-    eps = sorted(model_dir.glob("model.pt.ep*"),
-                 key=lambda p: int(p.name.split("ep")[-1]))
+    # ep18.200 같은 epoch 중간 체크포인트가 섞이므로 (epoch, step) 으로 정렬한다.
+    # 통째로 int() 하면 ValueError 로 죽는다(average_checkpoints.py 와 같은 함정).
+    def order(p):
+        head, _, step = p.name.split("ep")[-1].partition(".")
+        if not head.isdigit():
+            return (-1, -1)
+        return (int(head), int(step) if step.isdigit() else 10 ** 9)
+
+    eps = sorted(model_dir.glob("model.pt.ep*"), key=order)
     if not fallback.exists() and eps:
         fallback = eps[-1]
     if fallback.exists():
@@ -106,15 +113,28 @@ def main():
     print("\n[1/4] ONNX export 중... (원본 모델을 처음 받는다면 몇 분 걸림)")
     from funasr import AutoModel
 
-    model = AutoModel(model=str(args.model_dir), trust_remote_code=True,
-                      device="cpu", disable_update=True)
+    # init_param 을 안 주면 AutoModel 은 폴더 안의 model.pt(= 마지막 epoch)를
+    # 읽는다. 평균 체크포인트를 골라놓고 안 쓰면 고른 의미가 없다.
+    t_start = time.time()
+    model = AutoModel(model=str(args.model_dir), init_param=str(ckpt),
+                      trust_remote_code=True, device="cpu", disable_update=True)
     model.export(type="onnx", quantize=False)
 
-    # export 결과는 모델 폴더 안에 model.onnx 로 떨어진다.
-    produced = list(args.model_dir.rglob("model.onnx"))
+    # FunASR 은 config.yaml 의 output_dir 을 따라가서, --model-dir 바깥
+    # (예: 저장소 루트의 outputs2/)에 떨어뜨리기도 한다. 넓게 찾되 이번 실행에서
+    # 새로 만들어진 것만 고른다.
+    seen, produced = set(), []
+    for root in (args.model_dir, Path.cwd(), args.model_dir.parent):
+        for p in root.rglob("model.onnx"):
+            rp = p.resolve()
+            if rp in seen or p.stat().st_mtime < t_start - 5:
+                continue
+            seen.add(rp)
+            produced.append(p)
     if not produced:
         print("[x] model.onnx 가 생성되지 않았다. export 로그를 확인할 것.")
         return 1
+    produced.sort(key=lambda p: -p.stat().st_mtime)
     src_onnx = produced[0]
     src_root = src_onnx.parent
     print(f"    생성: {src_onnx}  ({src_onnx.stat().st_size / 1e6:.0f}MB)")
