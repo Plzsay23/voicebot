@@ -243,8 +243,10 @@ def synthesize_and_play(text: str):
         except Exception:
             pass
 
+    # 런처가 venv를 activate하지 않고 venv 파이썬을 직접 실행하므로 .venv/bin이
+    # PATH에 없다. 실행파일 대신 모듈로 호출해 PATH 의존을 없앤다.
     subprocess.run(
-        ["edge-tts", "--voice", EDGE_TTS_VOICE, "--text", text,
+        [sys.executable, "-m", "edge_tts", "--voice", EDGE_TTS_VOICE, "--text", text,
          "--write-media", str(REPLY_MP3)],
         check=True,
     )

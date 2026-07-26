@@ -25,6 +25,8 @@ SR = int(os.getenv("SAMPLE_RATE", "16000"))
 FRAME_SAMPLES = 512          # silero v5: 16k에서 512샘플(32ms) 고정
 FRAME_BYTES = FRAME_SAMPLES * 2
 FRAME_MS = 32
+CONTEXT_SAMPLES = 64         # silero v5: 직전 프레임 끝 64샘플을 앞에 붙여 576샘플로 넣어야 함
+                             # (빼먹으면 모델이 무조건 0에 가까운 확률만 뱉는다)
 
 SILERO_PATH = os.getenv(
     "SILERO_VAD_PATH",
@@ -49,12 +51,15 @@ class SileroVAD:
 
     def reset(self):
         self.state = np.zeros((2, 1, 128), dtype=np.float32)
+        self.context = np.zeros(CONTEXT_SAMPLES, dtype=np.float32)
 
     def prob(self, pcm_float: np.ndarray) -> float:
-        x = pcm_float.reshape(1, -1).astype(np.float32)
+        frame = pcm_float.astype(np.float32)
+        x = np.concatenate([self.context, frame]).reshape(1, -1)
         out, self.state = self.sess.run(
             None, {"input": x, "state": self.state, "sr": self.sr}
         )
+        self.context = frame[-CONTEXT_SAMPLES:]
         return float(out[0, 0])
 
 
