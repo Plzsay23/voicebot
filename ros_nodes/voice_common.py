@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 ROS 2 음성비서 노드들이 공유하는 로직 모음.
-STT(SenseVoice) / LLM(EXAONE) / 웹검색(DuckDuckGo) / 웨이크워드 / TTS(edge-tts).
+STT(SenseVoice) / LLM(EXAONE) / 웹검색(DuckDuckGo) / 웨이크워드 / TTS(piper 또는 edge-tts).
 chatbot.py 의 로직을 노드에서 재사용하기 좋게 정리한 것.
 """
 
@@ -39,10 +39,6 @@ N_THREADS_BATCH = int(os.getenv("N_THREADS_BATCH", "4"))
 N_BATCH = int(os.getenv("N_BATCH", "128"))
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "6"))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "160"))
-# 문장이 이 길이보다 짧으면 다음 문장과 합쳐서 TTS로 보낸다.
-# edge-tts 는 문장마다 네트워크 왕복이 있어서, "네." 같은 조각을 따로 보내면
-# 합성 오버헤드가 발화 길이보다 커진다.
-MIN_TTS_CHARS = int(os.getenv("MIN_TTS_CHARS", "12"))
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.5"))
 TOP_P = float(os.getenv("TOP_P", "0.9"))
 REPEAT_PENALTY = float(os.getenv("REPEAT_PENALTY", "1.1"))
@@ -64,7 +60,26 @@ BOT_NAME = os.getenv("BOT_NAME", "제리").strip()
 # 원본 모델로 되돌린다면 0.5 로 낮춰야 한다(0.6 에서 재현율 69.6%로 떨어진다).
 WAKE_MATCH_RATIO = float(os.getenv("WAKE_MATCH_RATIO", "0.6"))
 
+# ---- TTS ----
+# "piper" = 온디바이스(오프라인), "edge" = edge-tts(네트워크).
+# piper 를 기본으로 두되, 모델이 없거나 합성이 실패하면 edge 로 자동 폴백한다.
+# 되돌리려면 .env 에 TTS_BACKEND=edge 한 줄.
+TTS_BACKEND = os.getenv("TTS_BACKEND", "piper").strip().lower()
+
 EDGE_TTS_VOICE = os.getenv("EDGE_TTS_VOICE", "ko-KR-SunHiNeural")
+
+# 한국어 Piper 음성은 2026-07 기준 이것 하나뿐이다(KSS 단일화자, 22.05kHz).
+# scripts/setup_piper.sh 가 PIPER_DATA_DIR 아래로 받아둔다.
+PIPER_VOICE = os.getenv("PIPER_VOICE", "ko_KR-kss-medium")
+PIPER_DATA_DIR = Path(os.getenv("PIPER_DATA_DIR", str(BASE_DIR / "models" / "piper")))
+# 문장 사이 무음(초). 스트리밍에서 문장을 따로 합성하므로 0 이면 붙어 들린다.
+PIPER_SENTENCE_SILENCE = float(os.getenv("PIPER_SENTENCE_SILENCE", "0.2"))
+
+# 문장이 이 길이보다 짧으면 다음 문장과 합쳐서 TTS로 보낸다.
+# edge-tts 는 문장마다 네트워크 왕복이 있어서 "네." 같은 조각을 따로 보내면
+# 합성 오버헤드가 발화 길이보다 커진다. piper 는 로컬이라 그 비용이 없으므로
+# 합치지 않고 바로 내보내는 편이 첫 소리가 빨리 난다.
+MIN_TTS_CHARS = int(os.getenv("MIN_TTS_CHARS", "0" if TTS_BACKEND == "piper" else "12"))
 
 WEB_SEARCH_ENABLED = os.getenv("WEB_SEARCH_ENABLED", "true").lower() in (
     "1", "true", "yes", "y",
@@ -337,6 +352,67 @@ REPLY_MP3 = BASE_DIR / "reply.mp3"
 REPLY_WAV = BASE_DIR / "reply.wav"
 
 
+def piper_available() -> bool:
+    """piper 모듈과 음성 파일이 둘 다 있는지."""
+    if not (PIPER_DATA_DIR / f"{PIPER_VOICE}.onnx").exists():
+        return False
+    try:
+        import piper  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _resample_to_output(src: Path, out_wav: Path):
+    """스피커 싱크에 맞춰 48k 스테레오로 맞춘다(기존 재생 경로와 동일)."""
+    subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+         "-i", str(src), "-ar", "48000", "-ac", "2", str(out_wav)],
+        check=True,
+    )
+
+
+def _synthesize_piper(text: str, out_wav: Path):
+    raw = out_wav.with_name(out_wav.stem + "_piper.wav")
+    try:
+        # 텍스트를 `--` 뒤 위치인자로 넘긴다. 텍스트가 '-' 로 시작해도 안전하다.
+        subprocess.run(
+            [sys.executable, "-m", "piper",
+             "-m", PIPER_VOICE,
+             "--data-dir", str(PIPER_DATA_DIR),
+             "--sentence-silence", str(PIPER_SENTENCE_SILENCE),
+             "-f", str(raw),
+             "--", text],
+            check=True,
+        )
+        _resample_to_output(raw, out_wav)
+    finally:
+        try:
+            raw.unlink()
+        except Exception:
+            pass
+    return out_wav
+
+
+def _synthesize_edge(text: str, out_wav: Path):
+    mp3 = out_wav.with_suffix(".mp3")
+    try:
+        # 런처가 venv를 activate하지 않고 venv 파이썬을 직접 실행하므로 .venv/bin이
+        # PATH에 없다. 실행파일 대신 모듈로 호출해 PATH 의존을 없앤다.
+        subprocess.run(
+            [sys.executable, "-m", "edge_tts", "--voice", EDGE_TTS_VOICE,
+             "--text", text, "--write-media", str(mp3)],
+            check=True,
+        )
+        _resample_to_output(mp3, out_wav)
+    finally:
+        try:
+            mp3.unlink()
+        except Exception:
+            pass
+    return out_wav
+
+
 def synthesize(text: str, out_wav: Path):
     """text 를 합성해 out_wav 로 쓴다(재생하지 않음).
 
@@ -344,31 +420,27 @@ def synthesize(text: str, out_wav: Path):
     뒤 문장을 미리 합성해야 문장 사이가 벌어지지 않는다. 고정 파일명을 쓰면
     그 둘이 같은 파일을 두고 부딪힌다.
     """
-    mp3 = out_wav.with_suffix(".mp3")
-    for p in (mp3, out_wav):
+    for p in (out_wav.with_suffix(".mp3"), out_wav):
         try:
             if p.exists():
                 p.unlink()
         except Exception:
             pass
 
-    # 런처가 venv를 activate하지 않고 venv 파이썬을 직접 실행하므로 .venv/bin이
-    # PATH에 없다. 실행파일 대신 모듈로 호출해 PATH 의존을 없앤다.
-    subprocess.run(
-        [sys.executable, "-m", "edge_tts", "--voice", EDGE_TTS_VOICE, "--text", text,
-         "--write-media", str(mp3)],
-        check=True,
-    )
-    subprocess.run(
-        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-         "-i", str(mp3), "-ar", "48000", "-ac", "2", str(out_wav)],
-        check=True,
-    )
-    try:
-        mp3.unlink()
-    except Exception:
-        pass
-    return out_wav
+    if TTS_BACKEND == "piper":
+        if piper_available():
+            try:
+                return _synthesize_piper(text, out_wav)
+            except Exception as e:
+                # 여기서 죽으면 비서가 벙어리가 된다. 말은 나오게 하고 로그만 남긴다.
+                print(f"[tts] piper 실패, edge-tts 로 폴백: {e}", file=sys.stderr)
+        else:
+            print(
+                f"[tts] piper 음성 없음({PIPER_DATA_DIR / (PIPER_VOICE + '.onnx')}) "
+                "→ edge-tts 사용. scripts/setup_piper.sh 를 돌려라.",
+                file=sys.stderr,
+            )
+    return _synthesize_edge(text, out_wav)
 
 
 def play_wav(path: Path):

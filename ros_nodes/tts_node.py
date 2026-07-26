@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-tts_node: /voice/response 로 들어오는 문장을 edge-tts로 합성해 순서대로 재생한다.
+tts_node: /voice/response 로 들어오는 문장을 합성해 순서대로 재생한다.
+백엔드는 voice_common 의 TTS_BACKEND 가 정한다(piper=온디바이스 / edge=네트워크).
 
 dialog_node 가 답변을 문장 단위로 흘려보내므로(파이4에서 LLM 이 느려 전체 답변을
 기다리면 20초 넘게 조용하다), 이 노드는 문장을 큐에 쌓아 순서대로 처리한다.
@@ -45,7 +46,8 @@ class TtsNode(Node):
         threading.Thread(target=self._synth_loop, daemon=True).start()
         threading.Thread(target=self._play_loop, daemon=True).start()
         threading.Thread(target=self._release_loop, daemon=True).start()
-        self.get_logger().info("tts_node 시작 (edge-tts, 문장 스트리밍)")
+        backend = "piper" if (vc.TTS_BACKEND == "piper" and vc.piper_available()) else "edge-tts"
+        self.get_logger().info(f"tts_node 시작 ({backend}, 문장 스트리밍)")
 
     # ---------- 구독 ----------
     def on_response(self, msg: String):
