@@ -58,21 +58,29 @@ def load_prompts(path: Path):
 
 
 def load_manifest(path: Path):
-    """이미 녹음한 항목을 {index: record} 로 반환 (resume용)."""
-    done = {}
+    """녹음된 항목 목록을 그대로 반환."""
+    records = []
     if not path.exists():
-        return done
+        return records
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
             continue
         try:
-            rec = json.loads(line)
+            records.append(json.loads(line))
         except json.JSONDecodeError:
             continue
-        if "index" in rec:
-            done[int(rec["index"])] = rec
-    return done
+    return records
+
+
+def done_counts(records):
+    """문장 index 별로 몇 번 녹음됐는지 센다 (여러 회차 지원)."""
+    counts = {}
+    for r in records:
+        if "index" in r:
+            i = int(r["index"])
+            counts[i] = counts.get(i, 0) + 1
+    return counts
 
 
 class Recorder:
@@ -178,6 +186,11 @@ def main():
     ap.add_argument("--device", default=None, help="parecord --device 이름")
     ap.add_argument("--sr", type=int, default=SR)
     ap.add_argument("--list", action="store_true", help="진행 상황만 출력")
+    ap.add_argument("--passes", type=int, default=1,
+                    help="문장 목록을 몇 회차까지 녹음할지 (기본 1). "
+                         "예: 3 이면 각 문장을 3번씩 녹음한다.")
+    ap.add_argument("--fast", action="store_true",
+                    help="재생·확인 없이 바로 다음 문장으로. 대량 녹음용.")
     args = ap.parse_args()
 
     prompts = load_prompts(args.prompts)
@@ -188,29 +201,50 @@ def main():
     spk_dir = args.out / args.speaker
     wav_dir = spk_dir / "wav"
     manifest = spk_dir / "manifest.jsonl"
-    done = load_manifest(manifest)
+    records = load_manifest(manifest)
+    counts = done_counts(records)
 
+    target = len(prompts) * args.passes
+    done_n = len(records)
     print(f"화자: {args.speaker}")
-    print(f"문장: {len(prompts)}개 / 녹음 완료: {len(done)}개 "
-          f"/ 남은 것: {len(prompts) - len(done)}개")
+    print(f"문장 {len(prompts)}개 x {args.passes}회 = 목표 {target}발화")
+    print(f"녹음 완료 {done_n}개 / 남은 것 {max(0, target - done_n)}개")
     print(f"저장 위치: {spk_dir}")
     if args.list:
+        for p in range(args.passes):
+            n = sum(1 for i in range(len(prompts)) if counts.get(i, 0) > p)
+            print(f"  {p + 1}회차: {n}/{len(prompts)}")
         return 0
 
-    todo = [(i, t) for i, t in enumerate(prompts) if i not in done]
+    # 회차 단위로 돈다. 각 회차에서 아직 그만큼 녹음 안 된 문장만 대상.
+    todo = []
+    for p in range(args.passes):
+        for i, t in enumerate(prompts):
+            if counts.get(i, 0) <= p:
+                todo.append((i, p, t))
     if not todo:
-        print("\n모두 녹음되었습니다. 다시 녹음하려면 manifest.jsonl 의 해당 줄을 지우세요.")
+        print(f"\n목표 {target}발화를 모두 채웠습니다. "
+              f"더 늘리려면 --passes 를 키우세요.")
         return 0
 
-    print("\n[조작] Enter=녹음 시작/종료   저장 후: Enter=채택 r=다시 s=건너뛰기 q=종료")
-    print("[요령] 마이크에서 30cm 정도, 평소 말하는 속도와 톤으로. 조용한 환경에서.\n")
+    if args.fast:
+        print("\n[빠른 모드] 재생·확인 없이 바로 넘어갑니다. "
+              "레벨 경고가 뜬 것만 나중에 확인하세요.")
+        print("[조작] Enter=녹음 시작 → 읽고 → Enter=종료 후 자동 저장 (q=종료)")
+    else:
+        print("\n[조작] Enter=녹음 시작/종료   저장 후: Enter=채택 r=다시 s=건너뛰기 q=종료")
+    print("[요령] 마이크에서 30cm 정도, 평소 말하는 속도와 톤으로.")
+    if args.passes > 1:
+        print("[중요] 회차마다 톤·속도·마이크와의 거리를 조금씩 바꿀 것. "
+              "똑같이 읽으면 데이터를 늘린 효과가 없다.\n")
 
     rec = Recorder(device=args.device, sr=args.sr)
     saved = 0
+    warned = []
     try:
-        for idx, text in todo:
+        for pos, (idx, rnd, text) in enumerate(todo, 1):
             while True:
-                print(f"\n[{idx + 1}/{len(prompts)}]  \033[1m{text}\033[0m")
+                print(f"\n[{pos}/{len(todo)}] ({rnd + 1}회차)  \033[1m{text}\033[0m")
                 cmd = input("  Enter=녹음 시작 (s=건너뛰기, q=종료) > ").strip().lower()
                 if cmd == "q":
                     raise KeyboardInterrupt
@@ -233,28 +267,36 @@ def main():
                     print(f"  ✗ 너무 깁니다({dur:.1f}s). 다시 녹음하세요.")
                     continue
 
-                wav_path = wav_dir / f"{idx:04d}.wav"
+                # 회차별로 파일명을 달리해 이전 회차를 덮어쓰지 않게 한다.
+                name = f"{idx:04d}.wav" if rnd == 0 else f"{idx:04d}_r{rnd}.wav"
+                wav_path = wav_dir / name
                 write_wav(wav_path, pcm, args.sr)
                 warn = ""
                 if peak < -30:
-                    warn = "  ⚠ 소리가 작습니다(마이크에 가까이)"
+                    warn = "  ⚠ 소리가 작음(마이크에 가까이)"
                 elif peak > -1.5:
                     warn = "  ⚠ 클리핑 위험(조금 떨어져서)"
-                print(f"  저장: {wav_path.name}  {dur:.2f}s  peak {peak:.1f} dBFS{warn}")
-                play(wav_path)
+                print(f"  저장: {wav_path.name}  {dur:.2f}s  "
+                      f"peak {peak:.1f} dBFS{warn}")
+                if warn:
+                    warned.append(wav_path.name)
 
-                ans = input("  [Enter]=채택  r=다시  s=건너뛰기  q=종료 > ").strip().lower()
-                if ans == "r":
-                    continue
-                if ans == "s":
-                    wav_path.unlink(missing_ok=True)
-                    break
-                if ans == "q":
-                    raise KeyboardInterrupt
+                if not args.fast:
+                    play(wav_path)
+                    ans = input("  [Enter]=채택  r=다시  s=건너뛰기  q=종료 > ") \
+                        .strip().lower()
+                    if ans == "r":
+                        continue
+                    if ans == "s":
+                        wav_path.unlink(missing_ok=True)
+                        break
+                    if ans == "q":
+                        raise KeyboardInterrupt
 
                 with manifest.open("a", encoding="utf-8") as f:
                     f.write(json.dumps({
                         "index": idx,
+                        "round": rnd,
                         "audio_filepath": str(wav_path.relative_to(spk_dir)),
                         "text": text,
                         "duration": round(dur, 3),
@@ -268,10 +310,14 @@ def main():
     finally:
         rec.stop()
 
-    done = load_manifest(manifest)
-    total = sum(r.get("duration", 0) for r in done.values())
-    print(f"\n이번 세션 {saved}개 저장. 누적 {len(done)}/{len(prompts)}개, "
+    records = load_manifest(manifest)
+    total = sum(r.get("duration", 0) for r in records)
+    print(f"\n이번 세션 {saved}개 저장. 누적 {len(records)}/{target}발화, "
           f"총 {total / 60:.1f}분.")
+    if warned:
+        print(f"레벨 경고 {len(warned)}개: {', '.join(warned[:10])}"
+              f"{' ...' if len(warned) > 10 else ''}")
+        print("  들어보고 문제 있으면 manifest.jsonl 의 해당 줄만 지우고 다시 녹음하면 된다.")
     return 0
 
 
