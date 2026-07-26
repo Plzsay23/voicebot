@@ -8,7 +8,7 @@ fetch_open_data.py — 공개 한국어 음성 데이터셋을 내려받아 reco
 (catastrophic forgetting). 공개 데이터를 함께 섞어서 학습하기 위한 도구다.
 
 준비:
-    pip install "datasets>=2.19" soundfile librosa
+    pip install "datasets>=2.19,<4" soundfile librosa
 
 사용:
     python training/fetch_open_data.py --dataset zeroth --hours 3
@@ -86,7 +86,7 @@ def main():
         from datasets import load_dataset, Audio
     except ImportError as e:
         print(f"의존성이 없습니다: {e}")
-        print('설치: pip install "datasets>=2.19" soundfile librosa')
+        print('설치: pip install "datasets>=2.19,<4" soundfile librosa')
         return 1
 
     src = SOURCES[args.dataset]
