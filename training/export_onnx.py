@@ -39,14 +39,24 @@ AUX_FILES = [
 
 def find_checkpoint(model_dir: Path) -> Path:
     """학습 산출물 폴더에서 쓸 체크포인트를 고른다 (평균 모델 우선)."""
-    for name in ("model.pt.avg5", "model.pt.avg10", "model.pt"):
+    for name in ("model.pt.avg5", "model.pt.avg10"):
         p = model_dir / name
         if p.exists():
             return p
+
+    # 평균 모델은 학습이 끝까지 갔을 때만 만들어진다. 없다는 건 학습이
+    # 중간에 끊겼다는 뜻이라 성능이 덜 나온다. 진행은 시키되 경고한다.
+    fallback = model_dir / "model.pt"
     eps = sorted(model_dir.glob("model.pt.ep*"),
                  key=lambda p: int(p.name.split("ep")[-1]))
-    if eps:
-        return eps[-1]
+    if not fallback.exists() and eps:
+        fallback = eps[-1]
+    if fallback.exists():
+        print("[!] model.pt.avg5 가 없다 — 학습이 끝까지 안 갔을 가능성이 높다.")
+        print(f"    {fallback.name} 로 진행하지만 성능은 평균 모델보다 떨어진다.")
+        print("    outputs/train.log 끝부분을 확인할 것.")
+        return fallback
+
     raise FileNotFoundError(
         f"{model_dir} 에서 체크포인트를 못 찾았다. 학습이 끝났는지 확인할 것.")
 

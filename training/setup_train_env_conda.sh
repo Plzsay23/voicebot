@@ -64,7 +64,9 @@ pip install torch torchaudio --index-url "https://download.pytorch.org/whl/$CUDA
 
 info "FunASR 및 부속 패키지 설치 중..."
 pip install -U funasr modelscope huggingface_hub
-pip install -U onnx onnxruntime funasr-onnx
+# onnxscript 는 torch 2.6+ 의 torch.onnx.export 가 내부에서 import 한다.
+# 없으면 export_onnx.py 가 ModuleNotFoundError 로 죽는다.
+pip install -U onnx onnxruntime onnxscript funasr-onnx
 pip install -U soundfile librosa numpy
 # fetch_open_data.py 용. datasets 4.x 는 오디오 디코딩을 torchcodec 으로 바꿔서
 # item["audio"]["array"] 접근이 깨진다. 3.x 로 묶는다.
