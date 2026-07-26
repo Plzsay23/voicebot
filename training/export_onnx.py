@@ -99,6 +99,32 @@ def main():
     fp32 = out_dir / "model.onnx"
     if src_onnx.resolve() != fp32.resolve():
         shutil.copy2(src_onnx, fp32)
+        # torch 는 가중치를 model.onnx.data 로 따로 빼놓는다. 이걸 같이 안
+        # 옮기면 onnx.load 가 "should be stored in ..., but it is not regular
+        # file" 로 죽는다.
+        for ext in list(src_root.glob(src_onnx.name + ".data")) + \
+                   list(src_root.glob("*.onnx_data")):
+            shutil.copy2(ext, out_dir / ext.name)
+            print(f"    외부 가중치: {ext.name} ({ext.stat().st_size / 1e6:.0f}MB)")
+
+    # 파이의 funasr_onnx 는 모델 파일 하나만 보고, 양자화도 합쳐진 쪽이 안전하다.
+    # 원본이 1GB 정도라 2GB protobuf 한계 안에 들어간다.
+    externals = list(out_dir.glob("*.onnx.data")) + list(out_dir.glob("*.onnx_data"))
+    if externals:
+        print("    외부 가중치를 model.onnx 하나로 합치는 중...")
+        import onnx
+        from onnx.external_data_helper import convert_model_from_external_data
+        try:
+            m = onnx.load(str(fp32))            # 외부 데이터까지 메모리로 읽는다
+            convert_model_from_external_data(m)
+            onnx.save(m, str(fp32))
+        except Exception as e:
+            print(f"[x] 합치기 실패: {e}")
+            print("    모델이 2GB 를 넘으면 단일 파일로 못 만든다.")
+            return 1
+        for p in externals:
+            p.unlink()
+        print(f"    -> {fp32.name} ({fp32.stat().st_size / 1e6:.0f}MB)")
 
     # ---------------------------------------------------------- 2. 부속 파일
     print("\n[2/4] 부속 파일 복사")
