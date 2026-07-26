@@ -1,7 +1,10 @@
 # STT 파인튜닝 (SenseVoiceSmall)
 
 목표: 웨이크워드 "제리"와 자주 쓰는 명령어를 **내 목소리 + 파이 마이크 환경**에서
-확실하게 알아듣게 만든다. 학습은 이 PC(RTX 5060), 추론은 파이에서 그대로.
+확실하게 알아듣게 만든다. 녹음은 파이, 학습은 학교/연구실 GPU 서버, 추론은 파이.
+
+실행 절차는 [TRAINING.md](TRAINING.md) 를 따른다. 이 문서는 데이터가 뭔지와
+녹음 방법을 설명한다.
 
 ---
 
@@ -72,15 +75,16 @@ python3 training/record_dataset.py --speaker yjhan
 
 ---
 
-## 2. 공개 한국어 데이터 (PC에서)
+## 2. 공개 한국어 데이터 (GPU 서버에서)
 
 내 목소리 데이터만으로 학습하면 모델이 원래 알던 한국어를 잊어버린다
 (catastrophic forgetting). 공개 데이터를 3~10배 정도 섞어서 함께 학습한다.
 
+발화 300개 이상 모은 뒤에 하면 된다. 서버에서:
+
 ```bash
-pip install "datasets>=2.19" soundfile librosa
-py training/fetch_open_data.py --list          # 후보 보기
-py training/fetch_open_data.py --dataset zeroth --hours 3
+python training/fetch_open_data.py --list          # 후보 보기
+python training/fetch_open_data.py --dataset zeroth --hours 3
 ```
 
 | 이름 | 규모 | 라이선스 | 성격 |
