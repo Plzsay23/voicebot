@@ -38,10 +38,26 @@ SNR_CHOICES = (5, 10, 15, 20)  # 잡음 섞을 때 쓸 신호대잡음비(dB)
 
 
 def read_wav(path: Path):
+    """16bit PCM wav 를 mono float32 로 읽는다. 스테레오면 평균내서 합친다."""
     with wave.open(str(path), "rb") as w:
         sr = w.getframerate()
+        ch = w.getnchannels()
+        if w.getsampwidth() != 2:
+            raise ValueError(f"16bit PCM 이 아니다(sampwidth={w.getsampwidth()})")
         pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
-    return pcm.astype(np.float32) / 32768.0, sr
+    audio = pcm.astype(np.float32) / 32768.0
+    if ch > 1:
+        audio = audio[:len(audio) // ch * ch].reshape(-1, ch).mean(axis=1)
+    return audio, sr
+
+
+def resample(audio: np.ndarray, sr_from: int, sr_to: int) -> np.ndarray:
+    """선형보간 리샘플. 잡음을 발화 샘플레이트에 맞추는 용도라 이 정도면 충분하다."""
+    if sr_from == sr_to or audio.size == 0:
+        return audio
+    n_out = int(round(len(audio) * sr_to / sr_from))
+    return np.interp(np.linspace(0, len(audio) - 1, n_out),
+                     np.arange(len(audio)), audio).astype(np.float32)
 
 
 def write_wav(path: Path, audio: np.ndarray, sr: int):
@@ -108,12 +124,24 @@ def main():
     # ---- 잡음 로드 -------------------------------------------------------
     noises = []
     if args.noise_dir and args.noise_dir.exists():
+        bad = []
         for p in sorted(args.noise_dir.glob("*.wav")):
-            audio, sr = read_wav(p)
+            # 잡음 파일 하나가 깨졌다고 전체 변환이 죽으면 안 된다.
+            # (녹음이 중간에 끊기면 wav 헤더가 안 닫혀 이런 파일이 남는다)
+            try:
+                audio, sr = read_wav(p)
+            except Exception as e:
+                bad.append((p, e))
+                continue
+            if audio.size == 0:
+                bad.append((p, "내용이 비어 있음"))
+                continue
             noises.append((p.stem, audio, sr))
         print(f"잡음 파일 {len(noises)}개 로드: {args.noise_dir}")
+        for p, e in bad:
+            print(f"  [!] 건너뜀 {p.name}: {e}  -> 다시 녹음할 것")
     if args.noise_copies and not noises:
-        print("경고: --noise-copies 를 줬지만 잡음 파일이 없다. 증강을 건너뛴다.")
+        print("경고: --noise-copies 를 줬지만 쓸 수 있는 잡음 파일이 없다. 증강을 건너뛴다.")
         args.noise_copies = 0
 
     aug_dir = args.out / "augmented"
@@ -142,10 +170,15 @@ def main():
 
             # 잡음 증강본 생성 (첫 번째 데이터셋에만 적용)
             if di == 0 and args.noise_copies and noises:
-                speech, sr = read_wav(wav)
+                try:
+                    speech, sr = read_wav(wav)
+                except Exception as e:
+                    print(f"  [!] 증강 건너뜀 {wav.name}: {e}")
+                    continue
                 for k in range(args.noise_copies):
                     nname, naudio, nsr = random.choice(noises)
-                    if nsr != sr:
+                    naudio = resample(naudio, nsr, sr)   # 안 맞으면 맞춰준다
+                    if naudio.size == 0:
                         continue
                     snr = random.choice(SNR_CHOICES)
                     mixed = mix_noise(speech, naudio, snr)
