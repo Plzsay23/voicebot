@@ -26,6 +26,10 @@ class DialogNode(Node):
         self.history = []
         self.busy = False
         self.pub = self.create_publisher(String, "/voice/response", 10)
+        # 한 응답의 마지막 문장까지 보냈음을 알린다. tts_node 는 이 신호를 받고
+        # 큐가 다 비워진 뒤에야 마이크를 다시 연다(문장 사이에 마이크가 열려
+        # 자기 목소리를 주워담는 것을 막는다).
+        self.done_pub = self.create_publisher(Bool, "/voice/response_done", 10)
         self.create_subscription(String, "/voice/transcript", self.on_text, 10)
         self.create_subscription(Bool, "/voice/speaking", self.on_speaking, 10)
         self.speaking = False
@@ -60,12 +64,22 @@ class DialogNode(Node):
 
             self.get_logger().info(f"[생성] {user_text}")
             t0 = time.time()
-            answer = vc.ask_llm(self.llm, self.history, user_text, context)
-            self.get_logger().info(f"[답변 {time.time()-t0:.1f}s] {answer}")
-            self.pub.publish(String(data=answer))
+            n = 0
+            for sentence in vc.ask_llm_stream(
+                self.llm, self.history, user_text, context
+            ):
+                n += 1
+                dt = time.time() - t0
+                if n == 1:
+                    self.get_logger().info(f"[첫문장 {dt:.1f}s] {sentence}")
+                else:
+                    self.get_logger().info(f"[문장{n} {dt:.1f}s] {sentence}")
+                self.pub.publish(String(data=sentence))
+            self.get_logger().info(f"[답변완료 {time.time()-t0:.1f}s, {n}문장]")
         except Exception as e:
             self.get_logger().error(f"생성 실패: {e}")
         finally:
+            self.done_pub.publish(Bool(data=True))
             self.busy = False
 
 
