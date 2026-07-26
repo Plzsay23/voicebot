@@ -20,6 +20,11 @@ training/data/
 .venv-train/
 # 대본 생성용 venv (WSL, datasets 만 들어있음 — build_prompts.py 실행용)
 .venv-tools/
+# PC GPU LLM 서버용 venv (WSL, llama-cpp-python CUDA 빌드 — docs/PC_LLM.md)
+.venv-llm/
+.venv-llm-build.log
+.pc_llm_server.log
+.pc_llm_server.pid
 training/funasr_data/
 training/*.json
 # 공개 코퍼스에서 거른 문장 캐시 (build_prompts.py 가 다시 만든다)

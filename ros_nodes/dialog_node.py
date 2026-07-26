@@ -33,6 +33,17 @@ class DialogNode(Node):
         t0 = time.time()
         self.llm = vc.load_llm()
         self.get_logger().info(f"LLM 준비 완료 ({time.time()-t0:.1f}s)")
+        if vc.REMOTE_LLM_URL:
+            model = vc.remote_llm_target()
+            if model:
+                self.get_logger().info(
+                    f"원격 LLM 사용 가능: {vc.REMOTE_LLM_URL} ({model})"
+                )
+            else:
+                self.get_logger().info(
+                    f"원격 LLM({vc.REMOTE_LLM_URL}) 지금은 꺼져 있음 → 로컬 사용. "
+                    "발화마다 다시 확인한다."
+                )
 
         self.history = []
         self.busy = False
@@ -102,7 +113,9 @@ class DialogNode(Node):
                 else:
                     self.get_logger().info(f"[문장{n} {dt:.1f}s] {sentence}")
                 self.pub.publish(String(data=sentence))
-            self.get_logger().info(f"[답변완료 {time.time()-t0:.1f}s, {n}문장]")
+            self.get_logger().info(
+                f"[답변완료 {time.time()-t0:.1f}s, {n}문장, {vc.LAST_LLM_SOURCE}]"
+            )
         except Exception as e:
             self.get_logger().error(f"생성 실패: {e}")
         finally:

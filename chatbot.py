@@ -59,6 +59,10 @@ REQUIRE_WAKE_NAME = os.getenv("REQUIRE_WAKE_NAME", "true").lower() in (
     "yes",
     "y",
 )
+# 웨이크워드 퍼지 매칭 임계값. ros_nodes/voice_common.py 와 같은 값을 쓴다.
+# 0.5 는 원본 SenseVoice 시절 값이고, 파인튜닝 모델에서는 오검출만 만든다.
+# 자세한 실측은 voice_common.py 의 WAKE_MATCH_RATIO 주석 참고.
+WAKE_MATCH_RATIO = float(os.getenv("WAKE_MATCH_RATIO", "0.6"))
 
 # 비어 있으면 시스템 기본 입력 장치(ReSpeaker)를 사용한다.
 INPUT_DEVICE = os.getenv("INPUT_DEVICE", "").strip()
@@ -310,10 +314,12 @@ def has_wake_name(text: str) -> bool:
     for i in range(max(1, len(norm))):
         for w in (n, n + 1):
             seg = norm[i : i + w]
-            if not seg:
+            # 문자열 끝에서 한 글자로 잘린 조각은 비교하지 않는다.
+            # ratio("리","제리")=0.667 이라 리/제 로 끝나는 문장이 다 통과했다.
+            if len(seg) < n:
                 continue
             ratio = difflib.SequenceMatcher(None, seg, bot).ratio()
-            if ratio >= 0.5:
+            if ratio >= WAKE_MATCH_RATIO:
                 return True
 
     return False

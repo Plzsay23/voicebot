@@ -7,9 +7,12 @@ chatbot.py 의 로직을 노드에서 재사용하기 좋게 정리한 것.
 
 import os
 import sys
+import json
 import time
 import difflib
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -42,6 +45,29 @@ MAX_TOKENS = int(os.getenv("MAX_TOKENS", "160"))
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.5"))
 TOP_P = float(os.getenv("TOP_P", "0.9"))
 REPEAT_PENALTY = float(os.getenv("REPEAT_PENALTY", "1.1"))
+
+# ---- 원격 LLM (PC) ----
+# PC 에서 OpenAI 호환 서버가 돌고 있으면 그쪽에 생성을 맡기고, 안 돌고 있으면
+# 파이의 로컬 gguf 로 떨어진다. 파이는 24시간 켜두고 PC 는 켤 때만 쓰는 구성.
+#
+# REMOTE_LLM_URL 은 /v1 까지 포함한 주소:
+#   ollama          http://<PC>:11434/v1     (OLLAMA_HOST=0.0.0.0 필요)
+#   llama.cpp server http://<PC>:8080/v1
+#   LM Studio       http://<PC>:1234/v1
+# 비워두면 원격 기능 자체를 끈다(= 기존 동작과 완전히 동일).
+REMOTE_LLM_URL = os.getenv("REMOTE_LLM_URL", "").strip().rstrip("/")
+# 비워두면 /v1/models 의 첫 모델을 쓴다.
+REMOTE_LLM_MODEL = os.getenv("REMOTE_LLM_MODEL", "").strip()
+REMOTE_LLM_API_KEY = os.getenv("REMOTE_LLM_API_KEY", "").strip()
+# 생존 확인 타임아웃. PC 가 꺼져 있으면 이 시간만큼 손해 보고 로컬로 간다.
+# LAN 이면 정상 응답은 수 ms 이므로 짧게 잡아도 된다.
+REMOTE_LLM_PROBE_TIMEOUT = float(os.getenv("REMOTE_LLM_PROBE_TIMEOUT", "1.0"))
+# 생존 확인 결과 캐시(초). 매 발화마다 찔러보지 않기 위한 것.
+REMOTE_LLM_PROBE_TTL = float(os.getenv("REMOTE_LLM_PROBE_TTL", "10"))
+# 생성 요청 타임아웃(초). 청크 사이 간격 기준.
+REMOTE_LLM_TIMEOUT = float(os.getenv("REMOTE_LLM_TIMEOUT", "30"))
+# PC 는 빠르니 토큰 한도를 파이보다 넉넉히 준다.
+REMOTE_MAX_TOKENS = int(os.getenv("REMOTE_MAX_TOKENS", "256"))
 
 BOT_NAME = os.getenv("BOT_NAME", "제리").strip()
 
@@ -125,7 +151,10 @@ def has_wake_name(text: str) -> bool:
     for i in range(max(1, len(norm))):
         for w in (n, n + 1):
             seg = norm[i:i + w]
-            if not seg:
+            # 문자열 끝에서는 슬라이스가 짧게 잘린다. 한 글자짜리 조각을 그대로
+            # 비교하면 ratio("리","제리")=0.667 이라 임계값 0.6 을 넘어버려서
+            # "빨리", "언제" 처럼 리/제 로 끝나는 문장이 전부 웨이크워드로 잡혔다.
+            if len(seg) < n:
                 continue
             if difflib.SequenceMatcher(None, seg, bot).ratio() >= WAKE_MATCH_RATIO:
                 return True
@@ -220,6 +249,65 @@ def web_search(query: str) -> str:
 
 
 # ---------------- LLM ----------------
+# 마지막 생성에 실제로 쓰인 백엔드("remote"/"local"). 로그용.
+LAST_LLM_SOURCE = "local"
+
+# (확인시각, 모델명 또는 None) — None 은 "죽어 있음".
+_remote_probe = (0.0, None)
+
+
+def _remote_headers():
+    h = {"Content-Type": "application/json"}
+    if REMOTE_LLM_API_KEY:
+        h["Authorization"] = f"Bearer {REMOTE_LLM_API_KEY}"
+    return h
+
+
+def _probe_remote():
+    """PC 서버에 물어 쓸 모델명을 정한다. 죽어 있으면 None."""
+    req = urllib.request.Request(
+        f"{REMOTE_LLM_URL}/models", headers=_remote_headers()
+    )
+    with urllib.request.urlopen(req, timeout=REMOTE_LLM_PROBE_TIMEOUT) as r:
+        data = json.load(r)
+    ids = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
+    if REMOTE_LLM_MODEL:
+        if ids and REMOTE_LLM_MODEL not in ids:
+            print(
+                f"[llm] 원격에 {REMOTE_LLM_MODEL} 이 없다(있는 것: {', '.join(ids)}). "
+                "그대로 요청은 해본다.",
+                file=sys.stderr,
+            )
+        return REMOTE_LLM_MODEL
+    return ids[0] if ids else None
+
+
+def remote_llm_target():
+    """지금 원격을 쓸 수 있으면 모델명, 못 쓰면 None. 결과는 TTL 동안 캐시한다."""
+    global _remote_probe
+    if not REMOTE_LLM_URL:
+        return None
+    checked, model = _remote_probe
+    now = time.time()
+    if now - checked < REMOTE_LLM_PROBE_TTL:
+        return model
+    try:
+        model = _probe_remote()
+        if model is None:
+            print("[llm] 원격 서버에 모델이 없다 → 로컬 사용", file=sys.stderr)
+    except Exception as e:
+        # PC 가 꺼져 있는 정상적인 경우도 여기로 온다. 시끄럽지 않게 한 줄만.
+        print(f"[llm] 원격 없음({type(e).__name__}) → 로컬 사용", file=sys.stderr)
+        model = None
+    _remote_probe = (now, model)
+    return model
+
+
+def _mark_remote_down():
+    global _remote_probe
+    _remote_probe = (time.time(), None)
+
+
 def load_llm():
     from llama_cpp import Llama
 
@@ -281,13 +369,8 @@ def _split_ready(buf: str):
     return out, buf[start:]
 
 
-def ask_llm_stream(llm, history, user_text, context=None):
-    """문장이 완성될 때마다 하나씩 내주는 제너레이터. 끝나면 전체 답변을 반환한다.
-
-    `max_tokens` 에 걸려 잘린 경우 마지막 미완성 조각은 버린다. 어중간하게
-    끊긴 말을 읽어주는 것보다 한 문장 덜 말하는 편이 낫다.
-    """
-    messages = build_messages(history, user_text, context)
+def _pieces_local(llm, messages):
+    """로컬 llama.cpp 에서 (토큰조각, finish_reason) 을 흘려준다."""
     stream = llm.create_chat_completion(
         messages=messages,
         max_tokens=MAX_TOKENS,
@@ -296,14 +379,56 @@ def ask_llm_stream(llm, history, user_text, context=None):
         repeat_penalty=REPEAT_PENALTY,
         stream=True,
     )
-
-    buf = ""
-    spoken = []
-    finish = None
     for chunk in stream:
         choice = chunk["choices"][0]
-        finish = choice.get("finish_reason") or finish
-        piece = choice.get("delta", {}).get("content") or ""
+        yield (choice.get("delta", {}).get("content") or "",
+               choice.get("finish_reason"))
+
+
+def _pieces_remote(messages, model):
+    """PC 의 OpenAI 호환 서버에서 같은 모양으로 흘려준다(SSE)."""
+    body = json.dumps({
+        "model": model,
+        "messages": messages,
+        "max_tokens": REMOTE_MAX_TOKENS,
+        "temperature": TEMPERATURE,
+        "top_p": TOP_P,
+        "stream": True,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{REMOTE_LLM_URL}/chat/completions", data=body,
+        headers=_remote_headers(), method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=REMOTE_LLM_TIMEOUT) as resp:
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                chunk = json.loads(payload)
+            except ValueError:
+                continue
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            choice = choices[0]
+            yield (choice.get("delta", {}).get("content") or "",
+                   choice.get("finish_reason"))
+
+
+def _emit_sentences(pieces, spoken):
+    """토큰 조각 스트림을 완성된 문장 단위로 내준다.
+
+    `max_tokens` 에 걸려 잘린 경우 마지막 미완성 조각은 버린다. 어중간하게
+    끊긴 말을 읽어주는 것보다 한 문장 덜 말하는 편이 낫다.
+    """
+    buf = ""
+    finish = None
+    for piece, fr in pieces:
+        finish = fr or finish
         if not piece:
             continue
         buf += piece
@@ -321,6 +446,38 @@ def ask_llm_stream(llm, history, user_text, context=None):
             spoken.append(tail)
             yield tail
 
+
+def ask_llm_stream(llm, history, user_text, context=None):
+    """문장이 완성될 때마다 하나씩 내주는 제너레이터. 끝나면 전체 답변을 반환한다.
+
+    PC 서버가 살아 있으면 그쪽에서 생성하고, 없거나 도중에 끊기면 로컬로 간다.
+    단, 이미 한 문장이라도 말한 뒤에 끊긴 경우에는 로컬로 이어붙이지 않는다.
+    같은 답을 두 번 말하거나 앞뒤가 안 맞는 말이 이어지는 편이 더 나쁘다.
+    """
+    global LAST_LLM_SOURCE
+    messages = build_messages(history, user_text, context)
+    spoken = []
+
+    model = remote_llm_target()
+    if model:
+        LAST_LLM_SOURCE = "remote"
+        try:
+            for s in _emit_sentences(_pieces_remote(messages, model), spoken):
+                yield s
+        except Exception as e:
+            _mark_remote_down()
+            if spoken:
+                print(f"[llm] 원격 생성이 중간에 끊겼다: {e}", file=sys.stderr)
+            else:
+                print(f"[llm] 원격 실패 → 로컬로 재생성: {e}", file=sys.stderr)
+                LAST_LLM_SOURCE = "local"
+                for s in _emit_sentences(_pieces_local(llm, messages), spoken):
+                    yield s
+    else:
+        LAST_LLM_SOURCE = "local"
+        for s in _emit_sentences(_pieces_local(llm, messages), spoken):
+            yield s
+
     answer = " ".join(spoken).strip()
     if not answer:
         answer = "죄송합니다. 답변을 생성하지 못했습니다."
@@ -334,22 +491,10 @@ def ask_llm_stream(llm, history, user_text, context=None):
 
 
 def ask_llm(llm, history, user_text, context=None):
-    messages = build_messages(history, user_text, context)
-    out = llm.create_chat_completion(
-        messages=messages,
-        max_tokens=MAX_TOKENS,
-        temperature=TEMPERATURE,
-        top_p=TOP_P,
-        repeat_penalty=REPEAT_PENALTY,
-    )
-    answer = (out["choices"][0]["message"]["content"] or "").strip()
-    if not answer:
-        answer = "죄송합니다. 답변을 생성하지 못했습니다."
-    history.append({"role": "user", "content": user_text})
-    history.append({"role": "assistant", "content": answer})
-    if len(history) > MAX_HISTORY_MESSAGES:
-        del history[:-MAX_HISTORY_MESSAGES]
-    return answer
+    """한 번에 전체 답변을 돌려주는 버전. 원격/로컬 선택과 history 갱신은
+    ask_llm_stream 이 하는 것을 그대로 쓴다(분기 로직을 두 벌 두지 않는다)."""
+    parts = list(ask_llm_stream(llm, history, user_text, context))
+    return " ".join(parts).strip()
 
 
 # ---------------- TTS ----------------
