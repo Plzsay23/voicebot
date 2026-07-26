@@ -118,10 +118,11 @@ python3 training/record_dataset.py --speaker yjhan2 --passes 2 --fast
 겹치지 않는 홀드아웃 대본을 따로 만들어 두므로 그걸로 한 벌 더 받는다:
 
 ```bash
-python3 training/record_dataset.py --prompts training/prompts_eval.txt --speaker yjhan2_eval --passes 1
+python3 training/record_dataset.py --prompts training/prompts_eval.txt --speaker yjhan2_eval --passes 1 --fast
 ```
 
-이건 `--fast` 없이 확인하며 천천히 받는 게 좋다. 학습 때
+`--fast` 를 빼면 한 발화마다 재생해 주지만, 어차피 레벨 경고가 뜬 파일은 끝에
+목록으로 모아 주므로 그것만 나중에 확인하면 된다. 학습 때
 `prepare_funasr_data.py --data data/yjhan2` 만 넘기면 `yjhan2_eval` 은 자연히 빠진다.
 
 ### 잡음 녹음 (증강용)
