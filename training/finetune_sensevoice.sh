@@ -22,6 +22,7 @@ BATCH="${BATCH:-4000}"
 GPUS="${GPUS:-0}"
 
 info() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 
 # venv 판이면 여기서 활성화하고, conda 판이면 이미 활성화된 환경을 그대로 쓴다.
@@ -82,6 +83,16 @@ torchrun --nnodes 1 --nproc_per_node "$NPROC" "$TRAIN_PY" \
   ++output_dir="$OUT" 2>&1 | tee "$OUT/train.log"
 
 echo
+# FunASR 의 avg_nbest_model 은 검증 acc 가 0 으로만 찍히면 정렬이 무의미해져
+# 가장 오래된 ep1~ep5 를 평균 대상으로 고르는데, keep_nbest_models 가 그걸
+# 이미 지운 뒤라 "No checkpoints found for averaging" 으로 끝난다.
+# 그 경우 남아있는 마지막 5개로 직접 평균낸다.
+if [[ ! -f "$OUT/model.pt.avg5" ]]; then
+  info "model.pt.avg5 가 없다. 마지막 5개 epoch 으로 직접 평균낸다."
+  python average_checkpoints.py --dir "$OUT" --last 5 -o "$OUT/model.pt.avg5" || \
+    warn "평균 실패. export 는 model.pt 로도 진행할 수 있다."
+fi
+
 info "학습 완료. 산출물:"
 ls -lh "$OUT" | grep -E 'model.pt|config' | sed 's/^/    /' || true
 echo
