@@ -6,6 +6,7 @@ chatbot.py 의 로직을 노드에서 재사용하기 좋게 정리한 것.
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -125,6 +126,7 @@ SYSTEM_PROMPT = (
     "음성 대화이므로 아주 짧게 답한다. 기본 1~2문장, 최대 3문장. "
     "첫 문장에 결론부터 말한다. 인사말·서론·되묻기·요약으로 시작하지 마라. "
     "목록이나 마크다운을 쓰지 말고 말하듯 이어서 답한다. "
+    "이모지·이모티콘·특수기호는 절대 쓰지 마라. 소리 내어 읽을 수 있는 말만 쓴다. "
     "모르면 모른다고 솔직히 말한다."
 )
 
@@ -502,6 +504,51 @@ REPLY_MP3 = BASE_DIR / "reply.mp3"
 REPLY_WAV = BASE_DIR / "reply.wav"
 
 
+# 합성 전에 지워야 하는 문자들.
+#
+# 프롬프트로 이모지를 금지해도 LLM 은 가끔 어긴다. 그때 piper 는 이모지를
+# 음소로 바꾸지 못해 문장을 통째로 이상하게 읽거나 실패한다(edge-tts 는
+# "웃는 얼굴" 처럼 이름을 읽어버린다). 어느 쪽이든 원하는 소리가 아니므로
+# 합성 직전에 한 번 더 걸러낸다.
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F000-\U0001FAFF"       # 이모티콘·픽토그램·국기·카드 등 SMP 전역
+    "\U0001FB00-\U0001FBFF"       # 레거시 컴퓨팅 기호
+    "\U000E0020-\U000E007F"       # 태그 문자(국기 시퀀스 꼬리)
+    "←-⇿"               # 화살표
+    "⌀-⏿"               # 기타 기술기호(⏰ ⌛ …)
+    "①-⓿"               # 원문자
+    "■-➿"               # 도형·기타기호·딩뱃(★ ☀ ✅ ❤ …)
+    "⬀-⯿"               # 추가 화살표·도형
+    "︀-️"               # 변이 선택자(FE0F 이모지 표현)
+    "​-‍⁠﻿"   # 폭 없는 공백·ZWJ·BOM
+    "⃣©®™"    # 키캡·저작권·등록상표·상표
+    "]+",
+    flags=re.UNICODE,
+)
+# 마크다운 잔재. 그대로 두면 별표를 읽거나 운율이 깨진다.
+_MARKUP_RE = re.compile(r"[*_`#>|]+")
+# 읽을 거리가 남아 있는지 판단할 때 쓴다(한글/영문/숫자).
+_SPEAKABLE_RE = re.compile(r"[0-9A-Za-z가-힣ㄱ-ㆎ]")
+
+
+def strip_for_tts(text: str) -> str:
+    """이모지·마크다운 기호를 걷어낸 '읽을 수 있는' 문장을 돌려준다.
+
+    읽을 내용이 하나도 남지 않으면(예: 이모지만 있는 문장) 빈 문자열.
+    """
+    if not text:
+        return ""
+    text = _EMOJI_RE.sub(" ", text)
+    text = _MARKUP_RE.sub(" ", text)
+    # 기호를 지우면서 생긴 공백을 정리한다. 문장부호 앞 공백도 붙여준다.
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+([,.!?;:)\]}])", r"\1", text)
+    if not _SPEAKABLE_RE.search(text):
+        return ""
+    return text
+
+
 def piper_available() -> bool:
     """piper 모듈과 음성 파일이 둘 다 있는지."""
     if not (PIPER_DATA_DIR / f"{PIPER_VOICE}.onnx").exists():
@@ -564,12 +611,16 @@ def _synthesize_edge(text: str, out_wav: Path):
 
 
 def synthesize(text: str, out_wav: Path):
-    """text 를 합성해 out_wav 로 쓴다(재생하지 않음).
+    """text 를 합성해 out_wav 로 쓴다(재생하지 않음). 읽을 게 없으면 None.
 
     재생과 분리해 둔 이유: 문장 단위 스트리밍에서 앞 문장을 재생하는 동안
     뒤 문장을 미리 합성해야 문장 사이가 벌어지지 않는다. 고정 파일명을 쓰면
     그 둘이 같은 파일을 두고 부딪힌다.
     """
+    text = strip_for_tts(text)
+    if not text:
+        return None
+
     for p in (out_wav.with_suffix(".mp3"), out_wav):
         try:
             if p.exists():
@@ -598,5 +649,6 @@ def play_wav(path: Path):
 
 
 def synthesize_and_play(text: str):
-    synthesize(text, REPLY_WAV)
+    if synthesize(text, REPLY_WAV) is None:
+        return
     play_wav(REPLY_WAV)

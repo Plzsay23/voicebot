@@ -69,7 +69,10 @@ class TtsNode(Node):
                 self.slot = (self.slot + 1) % WAV_SLOTS
                 path = vc.BASE_DIR / f"tts_{self.slot}.wav"
                 t0 = time.time()
-                vc.synthesize(text, path)
+                if vc.synthesize(text, path) is None:
+                    # 이모지만 있는 문장 등. 읽을 게 없으니 재생을 건너뛴다.
+                    self.get_logger().info(f"[건너뜀] {text}")
+                    continue
                 self.get_logger().info(f"[합성 {time.time()-t0:.1f}s] {text}")
                 self.wav_q.put((path, text))
             except Exception as e:
