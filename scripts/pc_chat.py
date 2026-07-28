@@ -25,6 +25,9 @@ os.environ["REMOTE_LLM_URL"] = f"http://127.0.0.1:{args.port}/v1"
 os.environ.setdefault("REMOTE_LLM_PROBE_TTL", "60")
 # ddgs 를 이 venv 에 넣지 않았다. 검색은 파이에서만 쓴다.
 os.environ["WEB_SEARCH_ENABLED"] = "false"
+# 볼트 서버는 이 PC 에서 도는 것이니 여기서도 붙는다. 파이와 같은 검색·같은
+# 프롬프트로 확인하려는 것이다(볼트 서버가 안 떠 있으면 조용히 꺼진다).
+os.environ.setdefault("VAULT_SEARCH_URL", f"http://127.0.0.1:{os.getenv('VAULT_PORT', '8081')}")
 
 sys.path.insert(0, str(BASE_DIR / "ros_nodes"))
 import voice_common as vc  # noqa: E402
@@ -36,6 +39,10 @@ if not vc.remote_llm_target():
 print("=" * 60)
 print(f" {vc.BOT_NAME} / {vc.remote_llm_target()}  @ {os.environ['REMOTE_LLM_URL']}")
 print(" 파이와 같은 시스템 프롬프트·문장분할을 쓴다. 종료: q")
+if vc.vault_available():
+    print(f" 볼트 검색: 켜짐 ({os.environ['VAULT_SEARCH_URL']})")
+else:
+    print(" 볼트 검색: 꺼짐 (bash scripts/vault_search.sh 로 띄운다)")
 print("=" * 60)
 
 history = []
@@ -54,9 +61,13 @@ while True:
     first = None
     print(f"{vc.BOT_NAME} > ", end="", flush=True)
     try:
+        context = vc.gather_context(user)
+        if context:
+            print(f"\n   [{context[0][0]} {len(context[0][1])}자]\n{vc.BOT_NAME} > ",
+                  end="", flush=True)
         # 로컬 폴백은 이 창에서 의미가 없으므로 llm=None 을 넘긴다.
         # 원격이 죽으면 vc 가 로컬을 시도하다 죽는데, 그건 아래에서 잡는다.
-        for sentence in vc.ask_llm_stream(None, history, user):
+        for sentence in vc.ask_llm_stream(None, history, user, context):
             if first is None:
                 first = time.time() - t0
             print(sentence, end=" ", flush=True)

@@ -31,6 +31,7 @@ case "${1:-}" in
     else
       pkill -f "llama_cpp.server.*--port $PORT" && say "서버 종료했다." || warn "돌고 있는 서버가 없다."
     fi
+    bash "$BASE_DIR/scripts/vault_search.sh" --stop
     exit 0 ;;
   --log)
     tail -f "$LOG"; exit 0 ;;
@@ -64,6 +65,15 @@ fi
 
 # GPU 를 실제로 쓰는지 한 줄로 확인시켜 준다(offloaded 0 이면 CPU 로 돌고 있는 것).
 grep -m1 -o "offloaded [0-9]*/[0-9]* layers to GPU" "$LOG" 2>/dev/null | sed 's/^/  GPU: /'
+
+# ---------- 볼트 검색 서버 ----------
+# LLM 과 생명주기를 맞춰 둔다("PC 켜져 있을 때만" 이 두 기능의 공통 전제다).
+# 볼트가 없거나 기동에 실패해도 LLM 은 그대로 쓸 수 있어야 하므로 실패는 경고만.
+if [ "${PC_LLM_NO_VAULT:-}" != "1" ]; then
+  bash "$BASE_DIR/scripts/vault_search.sh" >/dev/null 2>&1 \
+    && say "볼트 검색 서버도 떠 있다 (:${VAULT_PORT:-8081})" \
+    || warn "볼트 검색 서버는 못 띄웠다(LLM 은 정상). 이유: bash scripts/vault_search.sh"
+fi
 
 # ---------- 파이가 붙을 주소 ----------
 IP="$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+')"

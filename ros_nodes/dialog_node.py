@@ -44,6 +44,9 @@ class DialogNode(Node):
                     f"원격 LLM({vc.REMOTE_LLM_URL}) 지금은 꺼져 있음 → 로컬 사용. "
                     "발화마다 다시 확인한다."
                 )
+        if vc.VAULT_SEARCH_URL:
+            state = "사용 가능" if vc.vault_available() else "지금은 꺼져 있음"
+            self.get_logger().info(f"볼트 검색({vc.VAULT_SEARCH_URL}) {state}")
 
         self.history = []
         self.busy = False
@@ -95,10 +98,10 @@ class DialogNode(Node):
 
     def _respond(self, user_text: str):
         try:
-            context = None
-            if vc.needs_search(user_text):
-                self.get_logger().info(f"[검색] {user_text}")
-                context = vc.web_search(user_text) or None
+            context = vc.gather_context(user_text)
+            if context:
+                label, body = context[0]
+                self.get_logger().info(f"[{label} {len(body)}자] {user_text}")
 
             self.get_logger().info(f"[생성] {user_text}")
             t0 = time.time()

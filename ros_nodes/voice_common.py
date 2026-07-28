@@ -13,6 +13,7 @@ import time
 import difflib
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -43,6 +44,12 @@ N_THREADS_BATCH = int(os.getenv("N_THREADS_BATCH", "4"))
 N_BATCH = int(os.getenv("N_BATCH", "128"))
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "6"))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "160"))
+# 참고자료가 붙었을 때의 토큰 한도(로컬/원격). 따로 두는 이유:
+# 자료를 붙이면 EXAONE 이 "요약해 드리겠습니다" 모드로 들어가 번호 목록을 뱉는다.
+# 프롬프트로 "두 문장 안에" 를 못 박아도 지키다 말다 한다(2026-07-28 실측).
+# 파이에서는 그 초과분이 그대로 대기시간이라 프롬프트가 아니라 한도로 막는다.
+# 프롬프트는 최선노력이고 한도는 보장이다.
+MAX_TOKENS_CONTEXT = int(os.getenv("MAX_TOKENS_CONTEXT", "120"))
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.5"))
 TOP_P = float(os.getenv("TOP_P", "0.9"))
 REPEAT_PENALTY = float(os.getenv("REPEAT_PENALTY", "1.1"))
@@ -69,6 +76,8 @@ REMOTE_LLM_PROBE_TTL = float(os.getenv("REMOTE_LLM_PROBE_TTL", "10"))
 REMOTE_LLM_TIMEOUT = float(os.getenv("REMOTE_LLM_TIMEOUT", "30"))
 # PC 는 빠르니 토큰 한도를 파이보다 넉넉히 준다.
 REMOTE_MAX_TOKENS = int(os.getenv("REMOTE_MAX_TOKENS", "256"))
+# 자료가 붙었을 때. PC 는 빨라도 **읽어주는 데 걸리는 시간**은 같으므로 묶는다.
+REMOTE_MAX_TOKENS_CONTEXT = int(os.getenv("REMOTE_MAX_TOKENS_CONTEXT", "200"))
 
 BOT_NAME = os.getenv("BOT_NAME", "제리").strip()
 
@@ -118,6 +127,24 @@ WEB_SEARCH_ENABLED = os.getenv("WEB_SEARCH_ENABLED", "true").lower() in (
 )
 WEB_SEARCH_RESULTS = int(os.getenv("WEB_SEARCH_RESULTS", "3"))
 WEB_SEARCH_REGION = os.getenv("WEB_SEARCH_REGION", "kr-kr")
+
+# ---- 볼트 RAG (PC 의 옵시디언 리서치위키) ----
+# 볼트를 파이에 복제하지 않는다. PC 가 켜져 있을 때만 scripts/vault_server.py 가
+# 뜨고 파이는 발화마다 거기에 물어본다. 꺼져 있으면 조용히 RAG 없이 답한다 —
+# REMOTE_LLM_URL 과 정확히 같은 정책이라 "PC 켜면 똑똑해진다" 로 일관된다.
+# 비워두면 기능 자체가 꺼진다.
+VAULT_SEARCH_URL = os.getenv("VAULT_SEARCH_URL", "").strip().rstrip("/")
+VAULT_SEARCH_RESULTS = int(os.getenv("VAULT_SEARCH_RESULTS", "3"))
+VAULT_PROBE_TIMEOUT = float(os.getenv("VAULT_PROBE_TIMEOUT", "1.0"))
+VAULT_PROBE_TTL = float(os.getenv("VAULT_PROBE_TTL", "10"))
+VAULT_SEARCH_TIMEOUT = float(os.getenv("VAULT_SEARCH_TIMEOUT", "3.0"))
+
+# 컨텍스트 예산(문자 수). **이게 이 기능의 진짜 비용이다.**
+# 파이4 에서는 프롬프트 토큰이 그대로 대기시간으로 돌아온다(생성 2.2 tok/s).
+# 웹검색이 이미 3건×180자 ≈ 500자를 넣고 실사용 중이므로 그 봉투를 그대로 쓴다.
+# PC 가 답할 때는 GPU 라 비용이 없어서 넉넉히 준다.
+VAULT_MAX_CHARS_LOCAL = int(os.getenv("VAULT_MAX_CHARS_LOCAL", "500"))
+VAULT_MAX_CHARS_REMOTE = int(os.getenv("VAULT_MAX_CHARS_REMOTE", "1500"))
 
 SAMPLE_RATE = int(os.getenv("SAMPLE_RATE", "16000"))
 
@@ -250,6 +277,116 @@ def web_search(query: str) -> str:
         return ""
 
 
+# ---------------- 볼트 검색 (PC) ----------------
+# 볼트를 뒤져볼 신호. 넉넉하게 잡았다 — 좁게 잡았더니 "TTS 를 왜 바꿨는지 기록
+# 찾아줘" 가 트리거에 안 걸려서, 답이 볼트에 그대로 있는데도 LLM 이 "내부
+# 데이터베이스에서 확인 가능합니다" 라고 지어냈다. 지어내는 것보다는 헛검색이 낫다.
+#
+# 넓혀도 안전한 이유는 VAULT_MIN_SCORE 가 뒤를 받치기 때문이다. 트리거는 "찾아볼까"
+# 만 정하고, 실제로 컨텍스트를 붙일지는 검색 점수가 정한다.
+VAULT_TRIGGERS = (
+    "논문", "연구", "위키", "노트", "볼트", "메모", "자료", "문헌", "레퍼런스",
+    "베이스라인", "실험", "알고리즘", "프로젝트", "어디까지", "진행",
+    "정리", "적어", "기록", "찾아", "알아봐", "뭐였", "어땠", "왜 ",
+)
+
+# 검색 점수 문턱. 이 아래는 "관련 자료 없음" 으로 본다.
+#
+# 2026-07-28 실측(178문서 볼트, 질문 15개): 관련 있는 질문의 1위 점수는 15.4~66.8,
+# 무관한 질문("피자 시켜줘", "지금 몇 시야")은 3.9~10.7 로 깨끗하게 갈렸다.
+# 13 은 그 사이다. 볼트가 커지면 다시 재야 한다.
+VAULT_MIN_SCORE = float(os.getenv("VAULT_MIN_SCORE", "13"))
+
+# (확인시각, 살아있나) — 원격 LLM 과 같은 방식의 캐시. 발화마다 찔러보지 않는다.
+_vault_probe = (0.0, False)
+
+
+def needs_vault(text: str) -> bool:
+    if not VAULT_SEARCH_URL:
+        return False
+    return any(kw in text for kw in VAULT_TRIGGERS)
+
+
+def vault_available() -> bool:
+    """PC 의 볼트 서버가 지금 떠 있나. 결과는 TTL 동안 캐시한다."""
+    global _vault_probe
+    if not VAULT_SEARCH_URL:
+        return False
+    checked, ok = _vault_probe
+    now = time.time()
+    if now - checked < VAULT_PROBE_TTL:
+        return ok
+    try:
+        with urllib.request.urlopen(
+            f"{VAULT_SEARCH_URL}/health", timeout=VAULT_PROBE_TIMEOUT
+        ) as r:
+            ok = bool(json.load(r).get("ok"))
+    except Exception as e:
+        # PC 가 꺼져 있는 정상적인 경우도 여기로 온다. 한 줄만 남긴다.
+        print(f"[vault] 서버 없음({type(e).__name__}) → 볼트 없이 답한다", file=sys.stderr)
+        ok = False
+    _vault_probe = (now, ok)
+    return ok
+
+
+def vault_search(query: str, max_chars: int = None) -> str:
+    """PC 의 볼트에서 관련 조각을 받아 컨텍스트 문자열로 만든다. 없으면 "".
+
+    예산(max_chars)을 서버에 넘겨 **서버가 자르게** 한다. 받아놓고 여기서
+    자르면 마지막 결과가 통째로 날아가서, 예산을 넘기는 쪽이 손해를 본다.
+    """
+    global _vault_probe
+    if not vault_available():
+        return ""
+    if max_chars is None:
+        # PC 가 생성까지 맡으면 프롬프트 비용이 없으니 넉넉히, 파이가 답하면 짧게.
+        max_chars = (VAULT_MAX_CHARS_REMOTE if remote_llm_target()
+                     else VAULT_MAX_CHARS_LOCAL)
+    params = urllib.parse.urlencode({
+        "q": query, "k": VAULT_SEARCH_RESULTS, "maxchars": max_chars,
+        "minscore": VAULT_MIN_SCORE,
+    })
+    try:
+        with urllib.request.urlopen(
+            f"{VAULT_SEARCH_URL}/search?{params}", timeout=VAULT_SEARCH_TIMEOUT
+        ) as r:
+            data = json.load(r)
+    except Exception as e:
+        _vault_probe = (0.0, False)  # 다음 발화에서 다시 확인하게 만든다
+        print(f"[vault] 검색 실패({type(e).__name__})", file=sys.stderr)
+        return ""
+    lines = []
+    for item in data.get("results") or []:
+        text = (item.get("text") or "").strip()
+        if not text:
+            continue
+        title = (item.get("title") or item.get("path") or "").strip()
+        lines.append(f"- {title}: {text}" if title else f"- {text}")
+    return "\n".join(lines)
+
+
+def gather_context(user_text: str):
+    """질문에 붙일 참고자료를 모은다. [(라벨, 본문), ...] 또는 None.
+
+    볼트를 먼저 본다. 개인 노트가 웹 스니펫보다 이 사용자에게 정확하고,
+    둘 다 붙이면 컨텍스트 예산을 두 배로 쓰기 때문이다. 볼트가 비었을 때만
+    웹으로 내려간다.
+
+    웹검색 트리거에 걸린 질문도 일단 볼트를 본다. 볼트 검색은 PC 에서 1ms 짜리라
+    공짜에 가깝고, 점수가 낮으면 어차피 빈손으로 돌아온다. "제리, 내 STT 결과
+    어땠지" 처럼 두 트리거의 경계에 있는 질문을 놓치지 않으려는 것.
+    """
+    if needs_vault(user_text) or needs_search(user_text):
+        body = vault_search(user_text)
+        if body:
+            return [("내 연구 노트", body)]
+    if needs_search(user_text):
+        body = web_search(user_text)
+        if body:
+            return [("웹 검색 결과", body)]
+    return None
+
+
 # ---------------- LLM ----------------
 # 마지막 생성에 실제로 쓰인 백엔드("remote"/"local"). 로그용.
 LAST_LLM_SOURCE = "local"
@@ -325,14 +462,44 @@ def load_llm():
     )
 
 
+def _as_blocks(context):
+    """context 를 [(라벨, 본문)] 로 정규화한다.
+
+    문자열이 그대로 오면 예전처럼 웹 검색 결과로 본다(chatbot.py 등 옛 호출부 호환).
+    """
+    if not context:
+        return []
+    if isinstance(context, str):
+        return [("웹 검색 결과", context)]
+    blocks = []
+    for item in context:
+        if isinstance(item, dict):
+            label, body = item.get("label", "참고자료"), item.get("body", "")
+        else:
+            label, body = item
+        if body:
+            blocks.append((label, body))
+    return blocks
+
+
 def build_messages(history, user_text, context=None):
     system = SYSTEM_PROMPT
-    if context:
+    blocks = _as_blocks(context)
+    if blocks:
+        # **순서가 중요하다.** 참고자료를 먼저 깔고 지시를 맨 뒤에 둔다.
+        # 지시를 앞에 두고 자료를 뒤에 붙였더니 EXAONE 이 "요약해 드리겠습니다"
+        # 모드로 들어가 번호 목록을 뱉었다(1500자를 붙이면 매번). 모델이 마지막에
+        # 읽는 것이 자료가 아니라 "짧게 말하라" 가 되도록 뒤집은 것이다.
+        system += "\n\n아래는 사용자 질문과 관련해 찾아온 참고자료다."
+        for label, body in blocks:
+            system += f"\n\n[{label}]\n{body}"
         system += (
-            "\n\n아래는 사용자 질문과 관련된 웹 검색 결과다. "
-            "이 정보를 근거로 최신 사실에 맞게 답하라. "
-            "검색 결과에 없는 내용은 지어내지 마라.\n\n"
-            f"[검색 결과]\n{context}"
+            "\n\n이 자료를 근거로 답하라. 자료에 없는 내용은 지어내지 마라. "
+            # 검색은 질의어가 조금이라도 겹치면 무언가를 돌려준다. 엉뚱한 자료를
+            # 억지로 끼워 맞춰 답하는 것을 막으려면 무시해도 된다고 알려줘야 한다.
+            "자료가 질문과 상관없으면 그냥 무시하고 아는 대로 답하라.\n"
+            "자료가 아무리 길어도 답은 음성으로 읽어줄 것이므로 두 문장 안에 끝낸다. "
+            "번호·항목·목록으로 나열하지 마라. 자료를 요약하지 말고 질문에만 답하라."
         )
     messages = [{"role": "system", "content": system}]
     messages.extend(history)
@@ -355,9 +522,29 @@ def _split_ready(buf: str):
     for i, ch in enumerate(buf):
         if ch not in _SENT_END:
             continue
-        # "3.14", "1.5초" 처럼 소수점을 문장 끝으로 착각하지 않도록
-        if ch == "." and i + 1 < len(buf) and buf[i + 1].isdigit():
-            continue
+        # 마침표는 뒤에 공백이 와야 문장 끝이다. "3.14", "eval_stt.py",
+        # "192.168.0.41" 처럼 소수점·파일명·IP 를 문장 끝으로 착각하지 않는다.
+        # 볼트 노트에는 파일명이 널려 있어서 이게 없으면 "eval stt." / "py가…" 로
+        # 끊어 읽는다.
+        #
+        # 마침표가 버퍼의 마지막 글자면 **아직 판단하지 않고 다음 조각을 기다린다.**
+        # 문장 하나가 토큰 하나만큼 늦게 나가지만(파이에서 ~0.5초), 끊어 읽는 것보다
+        # 낫다. 스트림이 거기서 끝나면 _emit_sentences 의 tail 처리가 받아준다.
+        if ch == ".":
+            if i + 1 >= len(buf):
+                continue
+            if not buf[i + 1].isspace():
+                continue
+            # "1. 데이터 조정" 같은 목록 번호. 여기서 자르면 "일"만 읽는 한 글자
+            # 문장이 튀어나온다. 프롬프트로 목록을 금지해도 모델이 가끔 어긴다.
+            # 마침표 앞을 숫자만큼 되짚어, 그 앞이 공백(또는 처음)이면 번호로 본다.
+            # 문장 중간의 "2." 도 잡으려면 start 기준이 아니라 이렇게 봐야 한다.
+            # 부수 효과로 "2026. 7. 28." 같은 날짜 표기도 안 쪼개진다.
+            j = i
+            while j > 0 and buf[j - 1].isdigit():
+                j -= 1
+            if j < i and (j == 0 or buf[j - 1].isspace()):
+                continue
         # 종결부호 뒤에 붙는 따옴표·괄호까지 함께 가져간다
         end = i + 1
         while end < len(buf) and buf[end] in '"\'”’)]』」':
@@ -371,11 +558,11 @@ def _split_ready(buf: str):
     return out, buf[start:]
 
 
-def _pieces_local(llm, messages):
+def _pieces_local(llm, messages, max_tokens=None):
     """로컬 llama.cpp 에서 (토큰조각, finish_reason) 을 흘려준다."""
     stream = llm.create_chat_completion(
         messages=messages,
-        max_tokens=MAX_TOKENS,
+        max_tokens=max_tokens or MAX_TOKENS,
         temperature=TEMPERATURE,
         top_p=TOP_P,
         repeat_penalty=REPEAT_PENALTY,
@@ -387,12 +574,12 @@ def _pieces_local(llm, messages):
                choice.get("finish_reason"))
 
 
-def _pieces_remote(messages, model):
+def _pieces_remote(messages, model, max_tokens=None):
     """PC 의 OpenAI 호환 서버에서 같은 모양으로 흘려준다(SSE)."""
     body = json.dumps({
         "model": model,
         "messages": messages,
-        "max_tokens": REMOTE_MAX_TOKENS,
+        "max_tokens": max_tokens or REMOTE_MAX_TOKENS,
         "temperature": TEMPERATURE,
         "top_p": TOP_P,
         "stream": True,
@@ -459,12 +646,16 @@ def ask_llm_stream(llm, history, user_text, context=None):
     global LAST_LLM_SOURCE
     messages = build_messages(history, user_text, context)
     spoken = []
+    # 참고자료가 붙었으면 더 짧게 묶는다(위 MAX_TOKENS_CONTEXT 주석 참고).
+    has_ctx = bool(_as_blocks(context))
+    local_cap = MAX_TOKENS_CONTEXT if has_ctx else MAX_TOKENS
+    remote_cap = REMOTE_MAX_TOKENS_CONTEXT if has_ctx else REMOTE_MAX_TOKENS
 
     model = remote_llm_target()
     if model:
         LAST_LLM_SOURCE = "remote"
         try:
-            for s in _emit_sentences(_pieces_remote(messages, model), spoken):
+            for s in _emit_sentences(_pieces_remote(messages, model, remote_cap), spoken):
                 yield s
         except Exception as e:
             _mark_remote_down()
@@ -473,11 +664,11 @@ def ask_llm_stream(llm, history, user_text, context=None):
             else:
                 print(f"[llm] 원격 실패 → 로컬로 재생성: {e}", file=sys.stderr)
                 LAST_LLM_SOURCE = "local"
-                for s in _emit_sentences(_pieces_local(llm, messages), spoken):
+                for s in _emit_sentences(_pieces_local(llm, messages, local_cap), spoken):
                     yield s
     else:
         LAST_LLM_SOURCE = "local"
-        for s in _emit_sentences(_pieces_local(llm, messages), spoken):
+        for s in _emit_sentences(_pieces_local(llm, messages, local_cap), spoken):
             yield s
 
     answer = " ".join(spoken).strip()

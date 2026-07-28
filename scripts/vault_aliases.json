@@ -1,0 +1,24 @@
+{
+  "_comment": "STT 가 흘려 듣는 고유명사 되살리기. 왼쪽 문자열이 질의에 들어 있으면 오른쪽을 검색어에 '덧붙인다'(치환이 아니다). 볼트에 새 주제가 생기면 여기에 한 줄 추가하고 서버를 재시작할 필요 없이 다음 재스캔(기본 60초)에 반영된다.",
+
+  "브이엘에이": "VLA vision language action",
+  "비엘에이": "VLA",
+  "브이엘엠": "VLM",
+  "에프알엘": "FRL federated",
+  "연합학습": "federated learning FRL",
+  "연합 학습": "federated learning",
+  "크리트": "KRIT",
+  "케이알아이티": "KRIT",
+  "인트라러닝": "intra-learning",
+  "인트라 러닝": "intra-learning",
+  "클러스터링": "clustering",
+  "헤드 선출": "head election",
+  "베이스라인": "baseline",
+  "보이스봇": "voicebot",
+  "음성비서": "voicebot 음성비서",
+  "라즈베리파이": "라즈베리파이 파이 raspberry",
+  "센스보이스": "SenseVoice STT",
+  "엑사원": "EXAONE LLM",
+  "파이퍼": "piper TTS",
+  "웨이크워드": "웨이크워드 wake word 제리"
+}
